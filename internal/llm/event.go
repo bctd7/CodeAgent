@@ -1,31 +1,33 @@
 package llm
 
-// Event 是事件，是模型完成任务的过程，最后汇总成为 AssistantMessage。
+// EventType 区分消息生命周期通知和内容块更新通知。
 type EventType string
 
 const (
-	EventStart         EventType = "start"
-	EventTextStart     EventType = "text_start"
-	EventTextDelta     EventType = "text_delta"
-	EventTextEnd       EventType = "text_end"
-	EventThinkingStart EventType = "thinking_start"
-	EventThinkingDelta EventType = "thinking_delta"
-	EventThinkingEnd   EventType = "thinking_end"
-	EventToolCallStart EventType = "toolcall_start"
-	EventToolCallDelta EventType = "toolcall_delta"
-	EventToolCallEnd   EventType = "toolcall_end"
-	EventDone          EventType = "done"
-	EventError         EventType = "error"
+	EventMessageStart       EventType = "start"
+	EventTextBlockStart     EventType = "text_start"
+	EventTextDelta          EventType = "text_delta"
+	EventTextBlockEnd       EventType = "text_end"
+	EventThinkingBlockStart EventType = "thinking_start"
+	EventThinkingDelta      EventType = "thinking_delta"
+	EventThinkingBlockEnd   EventType = "thinking_end"
+	EventToolCallBlockStart EventType = "toolcall_start"
+	EventToolCallDelta      EventType = "toolcall_delta"
+	EventToolCallBlockEnd   EventType = "toolcall_end"
+	EventMessageComplete    EventType = "done"
+	EventMessageError       EventType = "error"
 )
 
+// Event 是 Provider 发给消费者的内部通知，不是服务端的 SSE 帧。
+// Message 包含 ContentBlock；Delta 是本次增量，Snapshot 是更新后的完整消息快照。
 type Event struct {
 	Type EventType `json:"type"`
-	// 块的索引
-	ContentIndex int
-	// 新增的负载内容
+	// 内容块在 Message.Content 中的位置；仅内容块事件使用。
+	BlockIndex int
+	// 本次新增的文本、思考或工具参数片段；仅 Delta 事件使用。
 	Delta string
-	// 当前累积快照
-	Partial *AssistantMessage
-	// 终态全量数据
-	Final *AssistantMessage
+	// 非终止事件携带的当前完整消息快照，只读。
+	Snapshot *AssistantMessage
+	// 消息完成、失败或取消时的最终消息，只读。
+	FinalMessage *AssistantMessage
 }

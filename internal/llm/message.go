@@ -32,7 +32,8 @@ type UserMessage struct {
 	Timestamp time.Time
 }
 
-// AssistantMessage 是模型一次调用在任意时刻的快照。
+// AssistantMessage 是一次模型调用产生的消息，可处于生成中或终态。
+// Content 保存内容块；事件中的 Snapshot 是这条消息在某个时刻的只读快照。
 type AssistantMessage struct {
 	Role          Role
 	Content       []ContentBlock

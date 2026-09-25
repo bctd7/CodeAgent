@@ -17,7 +17,7 @@ type Result struct {
 
 // StreamReader 是消费者（Agent）拿到的"读卡"：用它读取模型的流式输出。
 //
-// 消费者只读契约：从 StreamReader 读取到的所有事件、Partial 快照及最终 Result.Message
+// 消费者只读契约：从 StreamReader 读取到的所有事件、Snapshot 快照及最终 Result.Message
 // 均由消费者保持只读，消费者不得在外部修改其内部 Content 切片或参数 Map。
 type StreamReader interface {
 	// Next 取下一个事件；没有则阻塞等待，直到有新事件、流结束或 ctx 取消。
@@ -25,13 +25,13 @@ type StreamReader interface {
 	Next(context.Context) (Event, bool)
 	// Result 阻塞直到流到达终态，返回最终消息。它不依赖事件消费。
 	Result() Result
-	// Close 中止这条流：以 aborted 收尾，保留已产生的 partial。
+	// Close 中止这条流：以 aborted 收尾，保留最近发布的消息快照。
 	Close()
 }
 
 // StreamWriter 是适配器拿到的"写卡"：用它产出事件并终止流。
 //
-// 快照契约：写卡发出的消息快照（Partial/Final 以及 Finish 的 message）
+// 快照契约：写卡发出的消息快照（Snapshot/FinalMessage 以及 Finish 的 message）
 // 交出去之后即视为不可变——流不再拷贝它们，直接引用。适配器若要原地累积
 // 内容（比如把 delta 拼进同一个 ContentBlock），必须自己复制一份再发出，
 // 而不是在发出后继续改动同一份。
@@ -45,7 +45,7 @@ type StreamWriter interface {
 	Finish(message AssistantMessage) bool
 	// Fail 以失败终止流（State=error）。
 	Fail(message AssistantMessage, internalErr error) bool
-	// Abort 以取消终止流（State=aborted），保留已产生的 partial。
+	// Abort 以取消终止流（State=aborted），保留最近发布的消息快照。
 	Abort(cause error) bool
 }
 
@@ -64,7 +64,7 @@ type eventStream struct {
 
 	terminal bool
 	result   Result
-	// 当前最新的消息快照，Abort 时用它保留 partial。
+	// 最近发布的完整消息快照，Abort 时用它保留已生成内容。
 	latestMessage AssistantMessage
 
 	// 流的生命线：从 parent 派生，交给适配器发 HTTP；终止时 cancelWork 停掉它。
@@ -165,19 +165,19 @@ func (es *eventStream) Emit(event Event) error {
 		return fmt.Errorf("流已经终止，不能发布 %s", event.Type)
 	}
 	// 终止事件不能走 Emit，必须走 Finish/Fail/Abort。
-	if event.Type == EventDone || event.Type == EventError {
+	if event.Type == EventMessageComplete || event.Type == EventMessageError {
 		err := fmt.Errorf("终止事件必须通过 Finish、Fail 或 Abort 发布")
 		es.failInvariantLocked(err)
 		return err
 	}
-	// 每个非终止事件必须带 partial 快照。
-	if event.Partial == nil {
-		err := fmt.Errorf("事件 %s 缺少 partial 快照", event.Type)
+	// 每个非终止事件必须带消息快照。
+	if event.Snapshot == nil {
+		err := fmt.Errorf("事件 %s 缺少消息快照", event.Type)
 		es.failInvariantLocked(err)
 		return err
 	}
 
-	es.latestMessage = *event.Partial
+	es.latestMessage = *event.Snapshot
 	es.appendEventLocked(event)
 	return nil
 }
@@ -247,15 +247,15 @@ func (es *eventStream) terminateLocked(message AssistantMessage, internalErr err
 		return false
 	}
 
-	eventType := EventError
+	eventType := EventMessageError
 	if message.State == StateSuccess {
-		eventType = EventDone
+		eventType = EventMessageComplete
 	}
 
 	es.latestMessage = message
 	es.result = Result{Message: message, InternalErr: internalErr}
 	es.terminal = true
-	es.appendEventLocked(Event{Type: eventType, Final: &message})
+	es.appendEventLocked(Event{Type: eventType, FinalMessage: &message})
 	close(es.resultNotify) // 先关结局铃，让 watcher 走正常退出
 	es.cancelWork()        // 再停掉适配器的网络
 	return true

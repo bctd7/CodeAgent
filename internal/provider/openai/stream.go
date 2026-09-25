@@ -77,10 +77,10 @@ func newStreamState(writer llm.StreamWriter, pricing llm.Pricing, initial llm.As
 
 func (s *streamState) emitEvent(evtType llm.EventType, contentIndex int, delta string) error {
 	return s.writer.Emit(llm.Event{
-		Type:         evtType,
-		ContentIndex: contentIndex,
-		Delta:        delta,
-		Partial:      snapshotMessage(s.message),
+		Type:       evtType,
+		BlockIndex: contentIndex,
+		Delta:      delta,
+		Snapshot:   snapshotMessage(s.message),
 	})
 }
 
@@ -147,7 +147,7 @@ func (s *streamState) applyDelta(delta chunkDelta) error {
 			s.message.Content = append(s.message.Content, llm.ContentBlock{
 				Type: llm.TypeThinking,
 			})
-			if err := s.emitEvent(llm.EventThinkingStart, s.thinkingIndex, ""); err != nil {
+			if err := s.emitEvent(llm.EventThinkingBlockStart, s.thinkingIndex, ""); err != nil {
 				return err
 			}
 		}
@@ -164,7 +164,7 @@ func (s *streamState) applyDelta(delta chunkDelta) error {
 			s.message.Content = append(s.message.Content, llm.ContentBlock{
 				Type: llm.TypeText,
 			})
-			if err := s.emitEvent(llm.EventTextStart, s.textIndex, ""); err != nil {
+			if err := s.emitEvent(llm.EventTextBlockStart, s.textIndex, ""); err != nil {
 				return err
 			}
 		}
@@ -186,7 +186,7 @@ func (s *streamState) applyDelta(delta chunkDelta) error {
 			})
 			tool = &toolCallState{contentIndex: contentIndex}
 			s.tools[tc.Index] = tool
-			if err := s.emitEvent(llm.EventToolCallStart, contentIndex, ""); err != nil {
+			if err := s.emitEvent(llm.EventToolCallBlockStart, contentIndex, ""); err != nil {
 				return err
 			}
 		} else {
@@ -237,11 +237,11 @@ func (s *streamState) completeBlocks() (llm.StopReason, error) {
 		var eventType llm.EventType
 		switch block.Type {
 		case llm.TypeText:
-			eventType = llm.EventTextEnd
+			eventType = llm.EventTextBlockEnd
 		case llm.TypeThinking:
-			eventType = llm.EventThinkingEnd
+			eventType = llm.EventThinkingBlockEnd
 		case llm.TypeToolCall:
-			eventType = llm.EventToolCallEnd
+			eventType = llm.EventToolCallBlockEnd
 		default:
 			continue
 		}
@@ -277,9 +277,9 @@ func (c *Client) run(writer llm.StreamWriter, request llm.Request, endpoint stri
 		return
 	}
 
-	// 2. 初始化完整的累积消息，发布 EventStart。
+	// 2. 初始化完整的累积消息，发布 EventMessageStart。
 	stream := newStreamState(writer, request.Model.Pricing, initial)
-	if err := stream.emitEvent(llm.EventStart, 0, ""); err != nil {
+	if err := stream.emitEvent(llm.EventMessageStart, 0, ""); err != nil {
 		return
 	}
 

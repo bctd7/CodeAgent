@@ -14,24 +14,6 @@ import (
 // defaultMaxSSEEventSize 是单个 SSE 事件的大小上限。
 const defaultMaxSSEEventSize = 1 << 20 // 1MB
 
-// chunkDelta 是流式 chunk 里 delta 的解析（文本 + 思考 + 工具调用）。
-type chunkDelta struct {
-	Role             string               `json:"role"`
-	Content          string               `json:"content"`
-	ReasoningContent string               `json:"reasoning_content"`
-	ToolCalls        []chunkToolCallDelta `json:"tool_calls"`
-}
-
-type chunkToolCallDelta struct {
-	Index    int    `json:"index"`
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
-}
-
 // mapStopReason 把 OpenAI 的 finish_reason 映射成领域层的 StopReason。
 // 返回 false 表示未知的结束原因。
 func mapStopReason(raw string) (llm.StopReason, bool) {
@@ -50,12 +32,12 @@ func mapStopReason(raw string) (llm.StopReason, bool) {
 // abortOrFail 统一处理"取消就 Abort，否则 Fail"的收尾。
 // 出错时使用当前累积消息 msg 收尾，保留已生成的内容。
 func abortOrFail(writer llm.StreamWriter, msg llm.AssistantMessage, err error) {
-	if writer.Context().Err() != nil {
-		writer.Abort(writer.Context().Err())
-	} else {
-		msg.ErrorMessage = err.Error()
-		writer.Fail(msg, nil)
+	if cause := writer.Context().Err(); cause != nil {
+		writer.Abort(cause)
+		return
 	}
+	msg.ErrorMessage = err.Error()
+	writer.Fail(msg, nil)
 }
 
 // snapshotMessage 仅复制 Content 切片头及元素，底层字符串和解析完成的参数 Map 保持只读复用。
@@ -75,18 +57,17 @@ type toolCallState struct {
 
 type streamState struct {
 	writer        llm.StreamWriter
-	request       llm.Request
+	pricing       llm.Pricing
 	message       llm.AssistantMessage
 	textIndex     int
 	thinkingIndex int
 	tools         map[int]*toolCallState // key: chunk 中的 tool_call index
-	emitFailed    bool
 }
 
-func newStreamState(writer llm.StreamWriter, request llm.Request, initial llm.AssistantMessage) *streamState {
+func newStreamState(writer llm.StreamWriter, pricing llm.Pricing, initial llm.AssistantMessage) *streamState {
 	return &streamState{
 		writer:        writer,
-		request:       request,
+		pricing:       pricing,
 		message:       initial,
 		textIndex:     -1,
 		thinkingIndex: -1,
@@ -95,20 +76,12 @@ func newStreamState(writer llm.StreamWriter, request llm.Request, initial llm.As
 }
 
 func (s *streamState) emitEvent(evtType llm.EventType, contentIndex int, delta string) error {
-	if s.emitFailed {
-		return fmt.Errorf("流已失败，停止发布事件")
-	}
-	err := s.writer.Emit(llm.Event{
+	return s.writer.Emit(llm.Event{
 		Type:         evtType,
 		ContentIndex: contentIndex,
 		Delta:        delta,
 		Partial:      snapshotMessage(s.message),
 	})
-	if err != nil {
-		s.emitFailed = true
-		return err
-	}
-	return nil
 }
 
 func (s *streamState) handleChunk(chunk chatCompletionChunk) error {
@@ -147,7 +120,7 @@ func (s *streamState) handleChunk(chunk chatCompletionChunk) error {
 			Reasoning: reasoning,
 			Total:     input + output + cached,
 		}
-		s.message.Usage = llm.CalculateCost(s.message.Usage, s.request.Model.Pricing)
+		s.message.Usage = llm.CalculateCost(s.message.Usage, s.pricing)
 	}
 
 	// 3. choice index 0 的增量与 4. choice index 0 的结束原因
@@ -156,19 +129,11 @@ func (s *streamState) handleChunk(chunk chatCompletionChunk) error {
 			continue
 		}
 
-		trimmedDelta := bytes.TrimSpace(choice.Delta)
-		if len(trimmedDelta) > 0 && !bytes.Equal(trimmedDelta, []byte("null")) {
-			var delta chunkDelta
-			if err := json.Unmarshal(trimmedDelta, &delta); err != nil {
-				return err
-			}
-			if err := s.applyDelta(delta); err != nil {
-				return err
-			}
-		}
-
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
 			s.message.RawStopReason = *choice.FinishReason
+		}
+		if err := s.applyDelta(choice.Delta); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -210,34 +175,32 @@ func (s *streamState) applyDelta(delta chunkDelta) error {
 	}
 
 	// 工具增量
-	if len(delta.ToolCalls) > 0 {
-		for _, tc := range delta.ToolCalls {
-			tool, exists := s.tools[tc.Index]
-			if !exists {
-				contentIndex := len(s.message.Content)
-				s.message.Content = append(s.message.Content, llm.ContentBlock{
-					Type: llm.TypeToolCall,
-					ID:   tc.ID,
-					Name: tc.Function.Name,
-				})
-				tool = &toolCallState{contentIndex: contentIndex}
-				s.tools[tc.Index] = tool
-				if err := s.emitEvent(llm.EventToolCallStart, contentIndex, ""); err != nil {
-					return err
-				}
-			} else {
-				if tc.ID != "" {
-					s.message.Content[tool.contentIndex].ID = tc.ID
-				}
-				if tc.Function.Name != "" {
-					s.message.Content[tool.contentIndex].Name = tc.Function.Name
-				}
+	for _, tc := range delta.ToolCalls {
+		tool, exists := s.tools[tc.Index]
+		if !exists {
+			contentIndex := len(s.message.Content)
+			s.message.Content = append(s.message.Content, llm.ContentBlock{
+				Type: llm.TypeToolCall,
+				ID:   tc.ID,
+				Name: tc.Function.Name,
+			})
+			tool = &toolCallState{contentIndex: contentIndex}
+			s.tools[tc.Index] = tool
+			if err := s.emitEvent(llm.EventToolCallStart, contentIndex, ""); err != nil {
+				return err
 			}
-			if tc.Function.Arguments != "" {
-				tool.args.WriteString(tc.Function.Arguments)
-				if err := s.emitEvent(llm.EventToolCallDelta, tool.contentIndex, tc.Function.Arguments); err != nil {
-					return err
-				}
+		} else {
+			if tc.ID != "" {
+				s.message.Content[tool.contentIndex].ID = tc.ID
+			}
+			if tc.Function.Name != "" {
+				s.message.Content[tool.contentIndex].Name = tc.Function.Name
+			}
+		}
+		if tc.Function.Arguments != "" {
+			tool.args.WriteString(tc.Function.Arguments)
+			if err := s.emitEvent(llm.EventToolCallDelta, tool.contentIndex, tc.Function.Arguments); err != nil {
+				return err
 			}
 		}
 	}
@@ -245,74 +208,49 @@ func (s *streamState) applyDelta(delta chunkDelta) error {
 	return nil
 }
 
-func (s *streamState) completeBlocks() (llm.StopReason, bool) {
+// completeBlocks 仅完成参数解析和块结束事件；失败由 run 统一收尾。
+func (s *streamState) completeBlocks() (llm.StopReason, error) {
 	// 1. 检查是否收到可识别的 finish_reason
 	if s.message.RawStopReason == "" {
-		s.message.ErrorMessage = "未收到 finish_reason"
-		s.writer.Fail(s.message, nil)
-		return "", false
+		return "", fmt.Errorf("未收到 finish_reason")
 	}
 	stopReason, ok := mapStopReason(s.message.RawStopReason)
 	if !ok {
-		s.message.ErrorMessage = fmt.Sprintf("未知的 finish_reason %q", s.message.RawStopReason)
-		s.writer.Fail(s.message, nil)
-		return "", false
+		return "", fmt.Errorf("未知的 finish_reason %q", s.message.RawStopReason)
 	}
 
 	// 2. 解析所有工具调用的参数，写入对应块
-	for idx := range s.message.Content {
-		if s.message.Content[idx].Type != llm.TypeToolCall {
-			continue
-		}
-		var tcState *toolCallState
-		for _, tc := range s.tools {
-			if tc.contentIndex == idx {
-				tcState = tc
-				break
-			}
-		}
-		rawArgs := ""
-		if tcState != nil {
-			rawArgs = strings.TrimSpace(tcState.args.String())
-		}
-		if rawArgs == "" {
-			s.message.ErrorMessage = fmt.Sprintf("工具 %s 参数解析失败: 参数为空", s.message.Content[idx].Name)
-			s.writer.Fail(s.message, nil)
-			return "", false
-		}
+	for _, tool := range s.tools {
+		block := &s.message.Content[tool.contentIndex]
 		var args map[string]any
-		if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
-			s.message.ErrorMessage = fmt.Sprintf("工具 %s 参数解析失败: %v", s.message.Content[idx].Name, err)
-			s.writer.Fail(s.message, nil)
-			return "", false
+		if err := json.Unmarshal([]byte(tool.args.String()), &args); err != nil {
+			return "", fmt.Errorf("工具 %s 参数解析失败: %w", block.Name, err)
 		}
 		if args == nil {
-			s.message.ErrorMessage = fmt.Sprintf("工具 %s 参数解析失败: 参数不能为 null", s.message.Content[idx].Name)
-			s.writer.Fail(s.message, nil)
-			return "", false
+			return "", fmt.Errorf("工具 %s 参数必须是 JSON 对象，不能为 null", block.Name)
 		}
-		s.message.Content[idx].Arguments = args
+		block.Arguments = args
 	}
 
 	// 3. 按 Content 顺序发布 TextEnd、ThinkingEnd、ToolCallEnd
 	for idx, block := range s.message.Content {
+		var eventType llm.EventType
 		switch block.Type {
 		case llm.TypeText:
-			if err := s.emitEvent(llm.EventTextEnd, idx, ""); err != nil {
-				return "", false
-			}
+			eventType = llm.EventTextEnd
 		case llm.TypeThinking:
-			if err := s.emitEvent(llm.EventThinkingEnd, idx, ""); err != nil {
-				return "", false
-			}
+			eventType = llm.EventThinkingEnd
 		case llm.TypeToolCall:
-			if err := s.emitEvent(llm.EventToolCallEnd, idx, ""); err != nil {
-				return "", false
-			}
+			eventType = llm.EventToolCallEnd
+		default:
+			continue
+		}
+		if err := s.emitEvent(eventType, idx, ""); err != nil {
+			return "", err
 		}
 	}
 
-	return stopReason, true
+	return stopReason, nil
 }
 
 // run 在后台 goroutine 里执行整个请求-响应流程。
@@ -321,8 +259,7 @@ func (c *Client) run(writer llm.StreamWriter, request llm.Request, endpoint stri
 	apiKey := os.Getenv(c.envKey)
 	req, err := http.NewRequestWithContext(writer.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		initial.ErrorMessage = err.Error()
-		writer.Fail(initial, nil)
+		abortOrFail(writer, initial, err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -336,17 +273,15 @@ func (c *Client) run(writer llm.StreamWriter, request llm.Request, endpoint stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		initial.ErrorMessage = fmt.Sprintf("HTTP %d", resp.StatusCode)
-		writer.Fail(initial, nil)
+		abortOrFail(writer, initial, fmt.Errorf("HTTP %d", resp.StatusCode))
 		return
 	}
 
 	// 2. 初始化完整的累积消息，发布 EventStart。
-	if err := writer.Emit(llm.Event{Type: llm.EventStart, Partial: snapshotMessage(initial)}); err != nil {
+	stream := newStreamState(writer, request.Model.Pricing, initial)
+	if err := stream.emitEvent(llm.EventStart, 0, ""); err != nil {
 		return
 	}
-
-	stream := newStreamState(writer, request, initial)
 
 	// 3. 调用 readSSE，在回调中解析和处理每个 JSON chunk。
 	err = readSSE(resp.Body, defaultMaxSSEEventSize, func(data []byte) error {
@@ -357,16 +292,15 @@ func (c *Client) run(writer llm.StreamWriter, request llm.Request, endpoint stri
 		return stream.handleChunk(chunk)
 	})
 	if err != nil {
-		if stream.emitFailed {
-			return
-		}
+		// Emit 失败时流内核已经终止，重复收尾不会覆盖其结果。
 		abortOrFail(writer, stream.message, err)
 		return
 	}
 
 	// 4. readSSE 正常返回后，检查结束原因并完成内容块。
-	stopReason, ok := stream.completeBlocks()
-	if !ok {
+	stopReason, err := stream.completeBlocks()
+	if err != nil {
+		abortOrFail(writer, stream.message, err)
 		return
 	}
 

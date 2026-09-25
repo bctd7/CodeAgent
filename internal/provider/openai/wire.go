@@ -74,9 +74,22 @@ type chatCompletionChunk struct {
 
 // choice 是流式 chunk 中的一个选择（delta + 结束原因）。
 type choice struct {
-	Index        int             `json:"index"`
-	Delta        json.RawMessage `json:"delta"`         // 延迟解析，reasoning 字段用探测函数处理
-	FinishReason *string         `json:"finish_reason"` // 中间 chunk 为 null，最后一块才有值
+	Index        int        `json:"index"`
+	Delta        chunkDelta `json:"delta"`
+	FinishReason *string    `json:"finish_reason"` // 中间 chunk 为 null，最后一块才有值
+}
+
+// chunkDelta 是单个候选答案的增量；缺失或 null 时保留零值。
+type chunkDelta struct {
+	Content          string               `json:"content"`
+	ReasoningContent string               `json:"reasoning_content"`
+	ToolCalls        []chunkToolCallDelta `json:"tool_calls"`
+}
+
+type chunkToolCallDelta struct {
+	Index    int              `json:"index"`
+	ID       string           `json:"id"`
+	Function functionCallWire `json:"function"`
 }
 
 // chunkUsage 是 token 用量（最后一块才有，需 stream_options.include_usage）。

@@ -11,8 +11,8 @@ import (
 	"CodeAgent/internal/llm"
 )
 
-// defaultMaxSSEEventSize 是单个 SSE 事件的大小上限。
-const defaultMaxSSEEventSize = 1 << 20 // 1MB
+// defaultMaxSSEFrameSize 是单个 SSE 帧的大小上限。
+const defaultMaxSSEFrameSize = 1 << 20 // 1MB
 
 // mapStopReason 把 OpenAI 的 finish_reason 映射成领域层的 StopReason。
 // 返回 false 表示未知的结束原因。
@@ -40,8 +40,8 @@ func abortOrFail(writer llm.StreamWriter, msg llm.AssistantMessage, err error) {
 	writer.Fail(msg, nil)
 }
 
-// snapshotMessage 仅复制 Content 切片头及元素，底层字符串和解析完成的参数 Map 保持只读复用。
-func snapshotMessage(msg llm.AssistantMessage) *llm.AssistantMessage {
+// messageSnapshot 仅复制 Content 切片头及元素，底层字符串和解析完成的参数 Map 保持只读复用。
+func messageSnapshot(msg llm.AssistantMessage) *llm.AssistantMessage {
 	snap := msg
 	if len(msg.Content) > 0 {
 		snap.Content = make([]llm.ContentBlock, len(msg.Content))
@@ -50,41 +50,44 @@ func snapshotMessage(msg llm.AssistantMessage) *llm.AssistantMessage {
 	return &snap
 }
 
-type toolCallState struct {
-	contentIndex int
-	args         strings.Builder
+// toolCallAccumulator 暂存一个工具调用尚未解析完成的参数。
+type toolCallAccumulator struct {
+	blockIndex int
+	args       strings.Builder
 }
 
-type streamState struct {
-	writer        llm.StreamWriter
-	pricing       llm.Pricing
-	message       llm.AssistantMessage
-	textIndex     int
-	thinkingIndex int
-	tools         map[int]*toolCallState // key: chunk 中的 tool_call index
+// responseAccumulator 将服务端 Chunk 中的 Delta 累积到 Message 的 Block，
+// 并发布内部 Event。事件队列和流的生命周期由 llm.StreamWriter 管理。
+type responseAccumulator struct {
+	writer             llm.StreamWriter
+	pricing            llm.Pricing
+	message            llm.AssistantMessage
+	textBlockIndex     int
+	thinkingBlockIndex int
+	tools              map[int]*toolCallAccumulator // key: chunk 中的 tool_call index
 }
 
-func newStreamState(writer llm.StreamWriter, pricing llm.Pricing, initial llm.AssistantMessage) *streamState {
-	return &streamState{
-		writer:        writer,
-		pricing:       pricing,
-		message:       initial,
-		textIndex:     -1,
-		thinkingIndex: -1,
-		tools:         make(map[int]*toolCallState),
+func newResponseAccumulator(writer llm.StreamWriter, pricing llm.Pricing, initial llm.AssistantMessage) *responseAccumulator {
+	return &responseAccumulator{
+		writer:             writer,
+		pricing:            pricing,
+		message:            initial,
+		textBlockIndex:     -1,
+		thinkingBlockIndex: -1,
+		tools:              make(map[int]*toolCallAccumulator),
 	}
 }
 
-func (s *streamState) emitEvent(evtType llm.EventType, contentIndex int, delta string) error {
+func (s *responseAccumulator) emitEvent(eventType llm.EventType, blockIndex int, delta string) error {
 	return s.writer.Emit(llm.Event{
-		Type:       evtType,
-		BlockIndex: contentIndex,
+		Type:       eventType,
+		BlockIndex: blockIndex,
 		Delta:      delta,
-		Snapshot:   snapshotMessage(s.message),
+		Snapshot:   messageSnapshot(s.message),
 	})
 }
 
-func (s *streamState) handleChunk(chunk chatCompletionChunk) error {
+func (s *responseAccumulator) applyChunk(chunk chatCompletionChunk) error {
 	// 1. 服务端错误
 	if chunk.Error != nil {
 		msg := chunk.Error.Message
@@ -123,7 +126,7 @@ func (s *streamState) handleChunk(chunk chatCompletionChunk) error {
 		s.message.Usage = llm.CalculateCost(s.message.Usage, s.pricing)
 	}
 
-	// 3. choice index 0 的增量与 4. choice index 0 的结束原因
+	// 只处理候选答案 0，记录结束原因并将增量应用到内容块。
 	for _, choice := range chunk.Choices {
 		if choice.Index != 0 {
 			continue
@@ -139,37 +142,37 @@ func (s *streamState) handleChunk(chunk chatCompletionChunk) error {
 	return nil
 }
 
-func (s *streamState) applyDelta(delta chunkDelta) error {
+func (s *responseAccumulator) applyDelta(delta responseDelta) error {
 	// 思考增量
 	if delta.ReasoningContent != "" {
-		if s.thinkingIndex == -1 {
-			s.thinkingIndex = len(s.message.Content)
+		if s.thinkingBlockIndex == -1 {
+			s.thinkingBlockIndex = len(s.message.Content)
 			s.message.Content = append(s.message.Content, llm.ContentBlock{
 				Type: llm.TypeThinking,
 			})
-			if err := s.emitEvent(llm.EventThinkingBlockStart, s.thinkingIndex, ""); err != nil {
+			if err := s.emitEvent(llm.EventThinkingBlockStart, s.thinkingBlockIndex, ""); err != nil {
 				return err
 			}
 		}
-		s.message.Content[s.thinkingIndex].Thinking += delta.ReasoningContent
-		if err := s.emitEvent(llm.EventThinkingDelta, s.thinkingIndex, delta.ReasoningContent); err != nil {
+		s.message.Content[s.thinkingBlockIndex].Thinking += delta.ReasoningContent
+		if err := s.emitEvent(llm.EventThinkingDelta, s.thinkingBlockIndex, delta.ReasoningContent); err != nil {
 			return err
 		}
 	}
 
 	// 文本增量
 	if delta.Content != "" {
-		if s.textIndex == -1 {
-			s.textIndex = len(s.message.Content)
+		if s.textBlockIndex == -1 {
+			s.textBlockIndex = len(s.message.Content)
 			s.message.Content = append(s.message.Content, llm.ContentBlock{
 				Type: llm.TypeText,
 			})
-			if err := s.emitEvent(llm.EventTextBlockStart, s.textIndex, ""); err != nil {
+			if err := s.emitEvent(llm.EventTextBlockStart, s.textBlockIndex, ""); err != nil {
 				return err
 			}
 		}
-		s.message.Content[s.textIndex].Text += delta.Content
-		if err := s.emitEvent(llm.EventTextDelta, s.textIndex, delta.Content); err != nil {
+		s.message.Content[s.textBlockIndex].Text += delta.Content
+		if err := s.emitEvent(llm.EventTextDelta, s.textBlockIndex, delta.Content); err != nil {
 			return err
 		}
 	}
@@ -178,28 +181,28 @@ func (s *streamState) applyDelta(delta chunkDelta) error {
 	for _, tc := range delta.ToolCalls {
 		tool, exists := s.tools[tc.Index]
 		if !exists {
-			contentIndex := len(s.message.Content)
+			blockIndex := len(s.message.Content)
 			s.message.Content = append(s.message.Content, llm.ContentBlock{
 				Type: llm.TypeToolCall,
 				ID:   tc.ID,
 				Name: tc.Function.Name,
 			})
-			tool = &toolCallState{contentIndex: contentIndex}
+			tool = &toolCallAccumulator{blockIndex: blockIndex}
 			s.tools[tc.Index] = tool
-			if err := s.emitEvent(llm.EventToolCallBlockStart, contentIndex, ""); err != nil {
+			if err := s.emitEvent(llm.EventToolCallBlockStart, blockIndex, ""); err != nil {
 				return err
 			}
 		} else {
 			if tc.ID != "" {
-				s.message.Content[tool.contentIndex].ID = tc.ID
+				s.message.Content[tool.blockIndex].ID = tc.ID
 			}
 			if tc.Function.Name != "" {
-				s.message.Content[tool.contentIndex].Name = tc.Function.Name
+				s.message.Content[tool.blockIndex].Name = tc.Function.Name
 			}
 		}
 		if tc.Function.Arguments != "" {
 			tool.args.WriteString(tc.Function.Arguments)
-			if err := s.emitEvent(llm.EventToolCallDelta, tool.contentIndex, tc.Function.Arguments); err != nil {
+			if err := s.emitEvent(llm.EventToolCallDelta, tool.blockIndex, tc.Function.Arguments); err != nil {
 				return err
 			}
 		}
@@ -209,7 +212,7 @@ func (s *streamState) applyDelta(delta chunkDelta) error {
 }
 
 // completeBlocks 仅完成参数解析和块结束事件；失败由 run 统一收尾。
-func (s *streamState) completeBlocks() (llm.StopReason, error) {
+func (s *responseAccumulator) completeBlocks() (llm.StopReason, error) {
 	// 1. 检查是否收到可识别的 finish_reason
 	if s.message.RawStopReason == "" {
 		return "", fmt.Errorf("未收到 finish_reason")
@@ -221,7 +224,7 @@ func (s *streamState) completeBlocks() (llm.StopReason, error) {
 
 	// 2. 解析所有工具调用的参数，写入对应块
 	for _, tool := range s.tools {
-		block := &s.message.Content[tool.contentIndex]
+		block := &s.message.Content[tool.blockIndex]
 		var args map[string]any
 		if err := json.Unmarshal([]byte(tool.args.String()), &args); err != nil {
 			return "", fmt.Errorf("工具 %s 参数解析失败: %w", block.Name, err)
@@ -278,34 +281,34 @@ func (c *Client) run(writer llm.StreamWriter, request llm.Request, endpoint stri
 	}
 
 	// 2. 初始化完整的累积消息，发布 EventMessageStart。
-	stream := newStreamState(writer, request.Model.Pricing, initial)
-	if err := stream.emitEvent(llm.EventMessageStart, 0, ""); err != nil {
+	accumulator := newResponseAccumulator(writer, request.Model.Pricing, initial)
+	if err := accumulator.emitEvent(llm.EventMessageStart, 0, ""); err != nil {
 		return
 	}
 
-	// 3. 调用 readSSE，在回调中解析和处理每个 JSON chunk。
-	err = readSSE(resp.Body, defaultMaxSSEEventSize, func(data []byte) error {
+	// 3. 读取 SSE 帧，将每帧的 JSON 数据解码为 Chunk 并累积消息。
+	err = readSSEFrames(resp.Body, defaultMaxSSEFrameSize, func(data []byte) error {
 		var chunk chatCompletionChunk
 		if err := json.Unmarshal(data, &chunk); err != nil {
 			return err
 		}
-		return stream.handleChunk(chunk)
+		return accumulator.applyChunk(chunk)
 	})
 	if err != nil {
 		// Emit 失败时流内核已经终止，重复收尾不会覆盖其结果。
-		abortOrFail(writer, stream.message, err)
+		abortOrFail(writer, accumulator.message, err)
 		return
 	}
 
-	// 4. readSSE 正常返回后，检查结束原因并完成内容块。
-	stopReason, err := stream.completeBlocks()
+	// 4. readSSEFrames 正常返回后，检查结束原因并完成内容块。
+	stopReason, err := accumulator.completeBlocks()
 	if err != nil {
-		abortOrFail(writer, stream.message, err)
+		abortOrFail(writer, accumulator.message, err)
 		return
 	}
 
 	// 5. 调用 writer.Finish(message)。
-	stream.message.State = llm.StateSuccess
-	stream.message.StopReason = stopReason
-	writer.Finish(stream.message)
+	accumulator.message.State = llm.StateSuccess
+	accumulator.message.StopReason = stopReason
+	writer.Finish(accumulator.message)
 }

@@ -7,19 +7,20 @@ import (
 	"io"
 )
 
-var donePayload = []byte("[DONE]")
+var sseDoneMarker = []byte("[DONE]")
 
-// readSSE 只负责 SSE 分帧：把 reader 里的 data 行拼成完整负载，交给 onData。
+// readSSEFrames 读取响应体流，将每个 SSE 帧的 data 行拼接后交给 onFrameData。
+// SSE 帧是网络数据边界，与 llm.Event 内部通知不同。
 // 它不理解 JSON；遇到 [DONE] 就停止。
-func readSSE(reader io.Reader, maxEventSize int, onData func([]byte) error) error {
+func readSSEFrames(reader io.Reader, maxFrameSize int, onFrameData func([]byte) error) error {
 	scanner := bufio.NewScanner(reader)
-	// 初始缓冲长度，超过扩容，最大长度 maxEventSize
-	scanner.Buffer(make([]byte, 4<<10), maxEventSize)
+	// 初始缓冲长度，超过扩容，最大长度 maxFrameSize
+	scanner.Buffer(make([]byte, 4<<10), maxFrameSize)
 
-	var dataLines [][]byte // 一个事件可能有多个 data 行，先收集
-	var curEventSize int
+	var dataLines [][]byte // 一个 SSE 帧可能有多个 data 行，先收集
+	var frameSize int
 
-	// flush 把一个事件的所有 data 行拼成一个完整负载，交给 onData。
+	// flush 把当前 SSE 帧的 data 行拼成完整负载，交给 onFrameData。
 	// 返回 done=true 表示遇到 [DONE]（流结束），调用方要停止。
 	flush := func() (bool, error) {
 		if len(dataLines) == 0 {
@@ -27,21 +28,21 @@ func readSSE(reader io.Reader, maxEventSize int, onData func([]byte) error) erro
 		}
 		payload := bytes.Join(dataLines, []byte("\n"))
 		dataLines = nil
-		curEventSize = 0
+		frameSize = 0
 
-		if bytes.Equal(bytes.TrimSpace(payload), donePayload) {
+		if bytes.Equal(bytes.TrimSpace(payload), sseDoneMarker) {
 			return true, nil // 遇到 [DONE]，结束
 		}
 		if len(bytes.TrimSpace(payload)) == 0 {
 			return false, nil // 空负载，跳过
 		}
-		return false, onData(payload)
+		return false, onFrameData(payload)
 	}
 
 	for scanner.Scan() {
 		line := bytes.TrimSuffix(scanner.Bytes(), []byte("\r"))
 		if len(line) == 0 {
-			// 空行 = 一个事件结束
+			// 空行表示当前 SSE 帧结束，不表示整条模型消息结束。
 			done, err := flush()
 			if err != nil || done {
 				return err
@@ -59,9 +60,9 @@ func readSSE(reader io.Reader, maxEventSize int, onData func([]byte) error) erro
 		if len(right) > 0 && right[0] == ' ' {
 			right = right[1:] // 去掉冒号后的一个空格
 		}
-		curEventSize += len(right)
-		if curEventSize > maxEventSize {
-			return fmt.Errorf("event too large: %d > %d", curEventSize, maxEventSize)
+		frameSize += len(right)
+		if frameSize > maxFrameSize {
+			return fmt.Errorf("event too large: %d > %d", frameSize, maxFrameSize)
 		}
 		dataLines = append(dataLines, append([]byte{}, right...))
 	}

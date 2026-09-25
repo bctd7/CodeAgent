@@ -74,19 +74,19 @@ type chatCompletionChunk struct {
 
 // choice 是流式 chunk 中的一个选择（delta + 结束原因）。
 type choice struct {
-	Index        int        `json:"index"`
-	Delta        chunkDelta `json:"delta"`
-	FinishReason *string    `json:"finish_reason"` // 中间 chunk 为 null，最后一块才有值
+	Index        int           `json:"index"`
+	Delta        responseDelta `json:"delta"`
+	FinishReason *string       `json:"finish_reason"` // 中间 chunk 为 null，最后一块才有值
 }
 
-// chunkDelta 是单个候选答案的增量；缺失或 null 时保留零值。
-type chunkDelta struct {
-	Content          string               `json:"content"`
-	ReasoningContent string               `json:"reasoning_content"`
-	ToolCalls        []chunkToolCallDelta `json:"tool_calls"`
+// responseDelta 是单个候选答案的增量；缺失或 null 时保留零值。
+type responseDelta struct {
+	Content          string          `json:"content"`
+	ReasoningContent string          `json:"reasoning_content"`
+	ToolCalls        []toolCallDelta `json:"tool_calls"`
 }
 
-type chunkToolCallDelta struct {
+type toolCallDelta struct {
 	Index    int              `json:"index"`
 	ID       string           `json:"id"`
 	Function functionCallWire `json:"function"`

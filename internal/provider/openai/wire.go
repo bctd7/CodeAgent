@@ -4,13 +4,15 @@ import "encoding/json"
 
 // chatRequest 是发送给模型的请求体（Chat Completions 协议）。
 type chatRequest struct {
-	Model         string        `json:"model"`
-	Stream        bool          `json:"stream"`
-	StreamOptions streamOptions `json:"stream_options"`
-	Messages      []chatMessage `json:"messages"`
-	Tools         []chatTool    `json:"tools,omitempty"`
-	Temperature   *float64      `json:"temperature,omitempty"`
-	MaxTokens     int           `json:"max_tokens,omitempty"`
+	Model               string        `json:"model"`
+	Stream              bool          `json:"stream"`
+	StreamOptions       streamOptions `json:"stream_options"`
+	Messages            []chatMessage `json:"messages"`
+	Tools               []chatTool    `json:"tools,omitempty"`
+	Temperature         *float64      `json:"temperature,omitempty"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+	ReasoningEffort     string        `json:"reasoning_effort,omitempty"`
 }
 
 // streamOptions 是流式请求的附加选项。
@@ -28,6 +30,18 @@ type chatMessage struct {
 	ReasoningContent string         `json:"reasoning_content,omitempty"`
 	ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string         `json:"tool_call_id,omitempty"`
+}
+
+// contentPart 是多模态 content 数组里的一个元素。
+type contentPart struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *imageURL `json:"image_url,omitempty"`
+}
+
+// imageURL 是图片内容的 data URL。
+type imageURL struct {
+	URL string `json:"url"`
 }
 
 // chatTool 是提供给模型的工具定义。
@@ -76,7 +90,7 @@ type chatCompletionChunk struct {
 type choice struct {
 	Index        int           `json:"index"`
 	Delta        responseDelta `json:"delta"`
-	FinishReason *string       `json:"finish_reason"` // 中间 chunk 为 null，最后一块才有值
+	FinishReason string        `json:"finish_reason"` // 缺失、null 和空字符串均表示尚无结束原因。
 }
 
 // responseDelta 是单个候选答案的增量；缺失或 null 时保留零值。

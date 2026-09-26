@@ -15,12 +15,14 @@ import (
 // 真正的活在 stream.go 的 run 里。
 type Client struct {
 	httpClient *http.Client
-	envKey     string // 读哪个环境变量拿 API key（来自 config 的 provider.env_key）
 }
 
-// NewClient 构造一个 Client。envKey 是读 API key 的环境变量名（由 config 层传入）。
-func NewClient(envKey string) *Client {
-	return &Client{httpClient: &http.Client{}, envKey: envKey}
+// NewClient 构造一个 Client，可注入自定义 http.Client（传入 nil 时使用默认客户端）。
+func NewClient(httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
+	return &Client{httpClient: httpClient}
 }
 
 // Stream 发起一次流式请求，立即返回读端（StreamReader）。

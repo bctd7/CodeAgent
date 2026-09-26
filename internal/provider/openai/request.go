@@ -8,18 +8,6 @@ import (
 	"CodeAgent/internal/llm"
 )
 
-// contentPart 是多模态 content 数组里的一个元素。
-type contentPart struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ImageURL *imageURL `json:"image_url,omitempty"`
-}
-
-// imageURL 是图片内容的 data URL。
-type imageURL struct {
-	URL string `json:"url"`
-}
-
 // buildRequestBody 把领域层的 llm.Request 翻译成 wire 的 JSON 请求体。
 func buildRequestBody(request llm.Request) ([]byte, error) {
 	wire := chatRequest{
@@ -27,11 +15,26 @@ func buildRequestBody(request llm.Request) ([]byte, error) {
 		Stream:        true,
 		StreamOptions: streamOptions{IncludeUsage: true},
 		Temperature:   request.Options.Temperature,
-		MaxTokens:     request.Options.MaxTokens,
 	}
-	if wire.MaxTokens == 0 {
-		wire.MaxTokens = request.Model.MaxTokens
+
+	// 输出限制优先使用请求选项，其次模型配置；均未设置时省略。
+	maxTokens := request.Options.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = request.Model.MaxTokens
 	}
+	if maxTokens > 0 {
+		if request.Options.OpenAI != nil && request.Options.OpenAI.MaxTokensField == "max_completion_tokens" {
+			wire.MaxCompletionTokens = maxTokens
+		} else {
+			wire.MaxTokens = maxTokens
+		}
+	}
+
+	// reasoning_effort 只在显式配置时发送。
+	if request.Options.OpenAI != nil && request.Options.OpenAI.ReasoningEffort != "" {
+		wire.ReasoningEffort = request.Options.OpenAI.ReasoningEffort
+	}
+
 	if request.SystemPrompt != "" {
 		wire.Messages = append(wire.Messages, chatMessage{Role: "system", Content: request.SystemPrompt})
 	}
@@ -70,14 +73,23 @@ func convertMessage(message llm.Message) (chatMessage, error) {
 		if err != nil {
 			return chatMessage{}, err
 		}
+		toolCalls, err := convertToolCalls(m.Content)
+		if err != nil {
+			return chatMessage{}, err
+		}
 		return chatMessage{
 			Role:             "assistant",
 			Content:          content,
 			ReasoningContent: convertReasoning(m.Content),
-			ToolCalls:        convertToolCalls(m.Content),
+			ToolCalls:        toolCalls,
 		}, nil
 
 	case *llm.ToolResultMessage:
+		for _, block := range m.Content {
+			if block.Type == llm.TypeImage {
+				return chatMessage{}, fmt.Errorf("Chat Completions 协议不支持工具结果包含图片")
+			}
+		}
 		content, err := convertContent(m.Content)
 		if err != nil {
 			return chatMessage{}, err
@@ -90,7 +102,7 @@ func convertMessage(message llm.Message) (chatMessage, error) {
 }
 
 // convertContent 把 text + image 块转成 content 字段。
-// 无图片 → 字符串；有图片 → contentPart 数组。
+// 无图片 → 字符串（拼接不擅自加入换行）；有图片 → contentPart 数组。
 func convertContent(blocks []llm.ContentBlock) (any, error) {
 	hasImage := false
 	for _, block := range blocks {
@@ -106,7 +118,7 @@ func convertContent(blocks []llm.ContentBlock) (any, error) {
 				texts = append(texts, block.Text)
 			}
 		}
-		return strings.Join(texts, "\n"), nil
+		return strings.Join(texts, ""), nil
 	}
 	parts := make([]contentPart, 0, len(blocks))
 	for _, block := range blocks {
@@ -123,7 +135,7 @@ func convertContent(blocks []llm.ContentBlock) (any, error) {
 	return parts, nil
 }
 
-// convertReasoning 把 thinking 块拼成 reasoning_content 字符串。
+// convertReasoning 把 thinking 块拼成 reasoning_content 字符串，不擅自加入换行。
 func convertReasoning(blocks []llm.ContentBlock) string {
 	var parts []string
 	for _, block := range blocks {
@@ -131,22 +143,25 @@ func convertReasoning(blocks []llm.ContentBlock) string {
 			parts = append(parts, block.Thinking)
 		}
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "")
 }
 
-// convertToolCalls 把 toolCall 块转成 tool_calls 数组。
-func convertToolCalls(blocks []llm.ContentBlock) []chatToolCall {
+// convertToolCalls 把 toolCall 块转成 tool_calls 数组。序列化失败返回具体错误。
+func convertToolCalls(blocks []llm.ContentBlock) ([]chatToolCall, error) {
 	var calls []chatToolCall
 	for _, block := range blocks {
 		if block.Type != llm.TypeToolCall {
 			continue
 		}
-		args, _ := json.Marshal(block.Arguments) // map[string]any → JSON 字符串
+		args, err := json.Marshal(block.Arguments)
+		if err != nil {
+			return nil, fmt.Errorf("工具 %s 参数序列化失败: %w", block.Name, err)
+		}
 		calls = append(calls, chatToolCall{
 			ID:       block.ID,
 			Type:     "function",
 			Function: functionCallWire{Name: block.Name, Arguments: string(args)},
 		})
 	}
-	return calls
+	return calls, nil
 }

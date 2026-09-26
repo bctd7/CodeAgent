@@ -2,19 +2,27 @@ package main
 
 import (
 	"fmt"
+	"os"
+
+	"CodeAgent/internal/config"
+	"CodeAgent/internal/demo"
+	"CodeAgent/internal/provider"
 )
 
-//TIP <p>To run your code, right-click the code and select <b>Run</b>.</p> <p>Alternatively, click
-// the <icon src="AllIcons.Actions.Execute"/> icon in the gutter and select the <b>Run</b> menu item from here.</p>
-func main() {
-	//TIP <p>Press <shortcut actionId="ShowIntentionActions"/> when your caret is at the underlined text
-	// to see how GoLand suggests fixing the warning.</p><p>Alternatively, if available, click the lightbulb to view possible fixes.</p>
-	s := "gopher"
-	fmt.Println("Hello and welcome, %s!", s)
+const configPath = "config.toml"
 
-	for i := 1; i <= 5; i++ {
-		//TIP <p>To start your debugging session, right-click your code in the editor and select the Debug option.</p> <p>We have set one <icon src="AllIcons.Debugger.Db_set_breakpoint"/> breakpoint
-		// for you, but you can always add more by pressing <shortcut actionId="ToggleLineBreakpoint"/>.</p>
-		fmt.Println("i =", 100/i)
+func main() {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "配置加载失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	entries := cfg.ModelEntries()
+	client := provider.NewClient(demo.NewDiagnosticHTTPClient())
+
+	if err := demo.Run(entries, client.Stream); err != nil {
+		fmt.Fprintf(os.Stderr, "演示运行失败: %v\n", err)
+		os.Exit(1)
 	}
 }

@@ -1,0 +1,24 @@
+[providers.gateway]
+base_url = "https://example.com/v1"
+api_key = "填写实际凭据"
+api = "openai-completions"
+
+[providers.gateway.headers]
+X-Client = "CodeAgent"
+
+[providers.gateway.models.coder]
+id = "实际模型ID"
+max_tokens = 8192
+
+[providers.gateway.models.coder.openai]
+reasoning_effort = "high"
+max_tokens_field = "max_completion_tokens"
+
+[providers.gateway.models.claude]
+id = "实际Claude模型ID"
+api = "anthropic"
+max_tokens = 8192
+
+[providers.gateway.models.claude.anthropic]
+thinking = "adaptive"
+effort = "high"

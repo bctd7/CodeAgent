@@ -22,7 +22,8 @@ type ContentBlock struct {
 	// thinking
 	Thinking          string
 	ThinkingSignature string
-	Redacted          bool // 是否被 Provider 隐去
+	Redacted          bool   // 是否被 Provider 隐去
+	RedactedData      string // redacted thinking 的不透明数据，不与图片 Data 混用
 
 	// image
 	Data     string // base64 编码的图片数据

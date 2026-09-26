@@ -1,7 +1,6 @@
 package llm
 
-// MessageState 表示消息所处的宏观生命周期状态。
-// 它回答「这条消息现在处于什么阶段」，而 StopReason 回答「成功结束时为什么结束」。
+// MessageState 表示消息生命周期及调用结果。
 type MessageState string
 
 const (
@@ -17,9 +16,10 @@ const (
 	StateDeferred MessageState = "deferred"
 )
 
-// StopReason 表示成功结束时「为什么结束」的具体原因。
-// 它只在 State == StateSuccess 时有意义：其它状态（pending/error/aborted/deferred）
-// 下它保持零值空串，消费者也不应读取它。这是约定，不靠代码强制。
+// StopReason 表示模型停止生成的原因。
+// - 正常成功使用 StopStop、StopLength、StopToolUse；
+// - 安全拦截使用 StateError + StopSafety；
+// - 普通错误、取消、内部契约错误仍使用空 StopReason。
 type StopReason string
 
 const (
@@ -29,6 +29,8 @@ const (
 	StopLength StopReason = "length"
 	// 需要继续执行工具
 	StopToolUse StopReason = "tool_use"
+	// 内容被安全过滤器拦截
+	StopSafety StopReason = "safety"
 )
 
 // IsTerminal 表示消息处于已定义的终态（success / error / aborted / deferred）。

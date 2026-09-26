@@ -13,6 +13,8 @@ type RequestOptions struct {
 	Headers     map[string]string
 	Temperature *float64
 	MaxTokens   int
+	OpenAI      *OpenAIOptions
+	Anthropic   *AnthropicOptions
 }
 
 // Request 是一次模型调用的完整输入。

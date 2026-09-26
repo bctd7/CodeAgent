@@ -212,7 +212,9 @@ func (es *eventStream) Fail(message AssistantMessage, internalErr error) bool {
 		return false
 	}
 	message.State = StateError
-	message.StopReason = ""
+	if !(internalErr == nil && message.StopReason == StopSafety) {
+		message.StopReason = ""
+	}
 	if internalErr != nil && message.ErrorMessage == "" {
 		message.ErrorMessage = "模型流内部状态错误"
 	}

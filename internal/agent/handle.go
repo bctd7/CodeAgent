@@ -27,6 +27,11 @@ func (h *RunHandle) ID() string {
 	return h.id
 }
 
+// Cancel 取消本句柄对应的任务：排队中移除该项，执行中请求中止。
+func (h *RunHandle) Cancel() {
+	h.agent.cancelHandle(h)
+}
+
 // Wait 等待本次任务执行完成并返回最终结果。
 // 若传入的 ctx 发生超时或取消，仅表示调用方放弃本次等待，底层任务继续执行。
 // 多次调用 Wait 返回相同的最终结果。

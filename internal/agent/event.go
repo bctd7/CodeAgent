@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"log"
 	"sync"
 	"time"
 
@@ -95,12 +96,20 @@ func (d *eventDispatcher) drain() {
 		d.events = d.events[1:]
 		d.mu.Unlock()
 
-		// 外部回调在锁外执行
-		d.onEvent(next)
+		// 外部回调在锁外执行。回调故障不应被误报为工具执行故障。
+		d.deliver(next)
 
 		d.mu.Lock()
 	}
-
 	d.emitting = false
 	d.mu.Unlock()
+}
+
+func (d *eventDispatcher) deliver(evt Event) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Agent 事件回调发生 panic: %v", r)
+		}
+	}()
+	d.onEvent(evt)
 }

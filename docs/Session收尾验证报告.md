@@ -18,7 +18,7 @@ internal/session/
     init.go           初始化、旧库迁移、数据库约束检查
     sessions.go       会话元数据读写
     runs.go           Run 记录读写
-    entries_tools.go        Entry 与 ToolExecution 读写
+    entries.go        Entry 与 ToolExecution 读写
   sql/                集中 SQL 常量
 ```
 

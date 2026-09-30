@@ -1,4 +1,5 @@
-package session
+// Package config 定义 Session 的共享记录、查询参数和状态，不负责读取配置文件。
+package config
 
 import (
 	"errors"
@@ -8,17 +9,35 @@ import (
 )
 
 var (
-	ErrSessionArchived    = errors.New("session is archived")
-	ErrRunActive          = errors.New("run is active")
-	ErrRunFinished        = errors.New("run is finished")
-	ErrToolResultConflict = errors.New("tool result conflict")
-	ErrToolCallNotFound   = errors.New("tool call not found")
-	ErrSessionConflict    = errors.New("session conflict")
+	ErrSessionArchived        = errors.New("session is archived")
+	ErrRunActive              = errors.New("run is active")
+	ErrRunFinished            = errors.New("run is finished")
+	ErrToolResultConflict     = errors.New("tool result conflict")
+	ErrToolCallNotFound       = errors.New("tool call not found")
+	ErrSessionConflict        = errors.New("session conflict")
+	ErrWorkingDirAlreadyBound = errors.New("working directory already bound")
 )
+
+// ArchiveFilter 表示会话列表的归档状态筛选选项。
+type ArchiveFilter string
+
+const (
+	ArchiveFilterActive   ArchiveFilter = "active"   // 默认仅未归档
+	ArchiveFilterArchived ArchiveFilter = "archived" // 仅已归档
+	ArchiveFilterAll      ArchiveFilter = "all"      // 全部
+)
+
+// SessionListOptions 为会话列表查询提供筛选、搜索与分页参数。
+// TitleSearch 是字面包含搜索；ASCII 字母忽略大小写，其他字符按 SQLite 默认规则比较。
+type SessionListOptions struct {
+	ArchiveFilter ArchiveFilter `json:"archive_filter"`
+	TitleSearch   string        `json:"title_search"`
+	Limit         int           `json:"limit"`
+	Offset        int           `json:"offset"`
+}
 
 // SessionInfo 是会话元数据，不是 Agent 实例或数据库连接。
 // 归档不会删除历史，切换历史分支不会回滚文件或工具副作用。
-// 为对话框服务
 type SessionInfo struct {
 	ID         string     `json:"id"`
 	Title      string     `json:"title"`
@@ -31,7 +50,7 @@ type SessionInfo struct {
 
 // RunRecord 保存一次实际开始的用户任务，不重复保存 Entry 中的消息正文。
 // ID 必须在会话重新打开后仍保持唯一，不能重新从 run_1 开始编号。
-// 重启发现未结束的 Run 时，以 aborted 收尾并说明运行中断，不自动重放工具。
+// 重启后由调用方确认任务不再运行，再显式标记 aborted；读取与初始化不自动恢复。
 type RunRecord struct {
 	ID           string     `json:"id"`
 	SessionID    string     `json:"session_id"`
@@ -71,12 +90,10 @@ type RunDetail struct {
 // ParentID 决定分支路径；Sequence 只表示会话内的写入顺序，不能据此拼接所有分支。
 // Message 使用 LLM 消息类型；持久化编解码负责按角色恢复具体类型。
 type Entry struct {
-	ID        string `json:"id"`
-	SessionID string `json:"session_id"`
-	ParentID  string `json:"parent_id,omitempty"` // 根记录为空；非空时必须指向同一会话的已有记录。
-	//会话当中的实际写入顺序
-	Sequence int64 `json:"sequence"`
-	//
+	ID        string    `json:"id"`
+	SessionID string    `json:"session_id"`
+	ParentID  string    `json:"parent_id,omitempty"` // 根记录为空；非空时必须指向同一会话的已有记录。
+	Sequence  int64     `json:"sequence"`            // 会话当中的实际写入顺序
 	RunID     string    `json:"run_id"`
 	CreatedAt time.Time `json:"created_at"`
 

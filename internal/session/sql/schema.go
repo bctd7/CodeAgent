@@ -1,9 +1,7 @@
--- 时间统一保存为 UTC RFC3339Nano 文本；可选 ID 和时间未设置时使用 NULL。
--- Message、Origin 和 Usage 使用 JSON 文本，编解码由 Go 层负责。
--- Store 应为每个连接启用 PRAGMA foreign_keys = ON。
--- Run 与首条 Entry 相互引用，创建时须在同一事务内写入。
--- 关联记录所属会话、Run 和消息角色由 Store 写入逻辑检查。
+package sql
 
+// CreateTablesSQL 定义空数据库初始化时的建表语句。
+const CreateTablesSQL = `
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL,
@@ -53,10 +51,15 @@ CREATE TABLE IF NOT EXISTS tool_executions (
     result_entry_id TEXT REFERENCES entries(id),
     PRIMARY KEY (assistant_entry_id, tool_call_id)
 );
+`
 
--- 会话内列出任务、按任务读取消息和工具执行记录。
+// CreateIndexesSQL 定义数据库索引创建语句。
+const CreateIndexesSQL = `
 CREATE INDEX IF NOT EXISTS runs_session_started ON runs(session_id, started_at, id);
 CREATE INDEX IF NOT EXISTS entries_run_sequence ON entries(run_id, sequence);
 CREATE INDEX IF NOT EXISTS tool_executions_run ON tool_executions(run_id);
 CREATE UNIQUE INDEX IF NOT EXISTS entries_assistant_tool_call ON entries(assistant_entry_id, tool_call_id) WHERE assistant_entry_id IS NOT NULL AND tool_call_id IS NOT NULL;
+`
 
+// SetUserVersionV2SQL 设置数据库版本号为 2。
+const SetUserVersionV2SQL = `PRAGMA user_version = 2`

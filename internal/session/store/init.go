@@ -1,28 +1,80 @@
-package session
+package store
 
 import (
 	"context"
 	"database/sql"
-	_ "embed"
 	"fmt"
+	"strings"
 
 	"CodeAgent/internal/llm"
+	"CodeAgent/internal/session/config"
+	sessql "CodeAgent/internal/session/sql"
 )
 
-//go:embed sql/schema.sql
-var schemaSQL string
+// initEmptyDatabase 仅负责空数据库的初始化流程：执行集中定义的建表、索引与版本初始化。
+func initEmptyDatabase(ctx context.Context, tx *sql.Tx, version int) error {
+	if version != 0 {
+		return fmt.Errorf("不支持的数据库结构: 数据库为空但版本为 %d", version)
+	}
 
-// CurrentSchemaVersion 是当前支持的表结构和消息格式版本。
-const CurrentSchemaVersion = 2
+	if _, err := tx.ExecContext(ctx, sessql.CreateTablesSQL); err != nil {
+		return fmt.Errorf("执行建表语句: %w", err)
+	}
 
-type tableColumn struct {
-	name    string
-	notnull bool
-	pk      int
+	if _, err := tx.ExecContext(ctx, sessql.CreateIndexesSQL); err != nil {
+		return fmt.Errorf("执行创建索引语句: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, sessql.SetUserVersionV2SQL); err != nil {
+		return fmt.Errorf("设置数据库版本号: %w", err)
+	}
+
+	return nil
 }
 
+type tableColumn struct {
+	pk int
+}
+
+// getExistingTables 查询已有非系统数据表名集合。
+func getExistingTables(ctx context.Context, tx *sql.Tx) (map[string]bool, error) {
+	rows, err := tx.QueryContext(ctx, sessql.SelectExistingTablesSQL)
+	if err != nil {
+		return nil, fmt.Errorf("检查已有数据表: %w", err)
+	}
+	defer rows.Close()
+
+	existingTables := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("读取表名: %w", err)
+		}
+		existingTables[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历表名失败: %w", err)
+	}
+	return existingTables, nil
+}
+
+// getTableColumns 查询指定表的列元数据。
 func getTableColumns(ctx context.Context, tx *sql.Tx, tableName string) (map[string]tableColumn, error) {
-	rows, err := tx.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", tableName))
+	var query string
+	switch tableName {
+	case "sessions":
+		query = sessql.TableInfoSessionsSQL
+	case "runs":
+		query = sessql.TableInfoRunsSQL
+	case "entries":
+		query = sessql.TableInfoEntriesSQL
+	case "tool_executions":
+		query = sessql.TableInfoToolExecutionsSQL
+	default:
+		return nil, fmt.Errorf("未知表名结构查询: %s", tableName)
+	}
+
+	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("查询表 %s 结构: %w", tableName, err)
 	}
@@ -41,7 +93,13 @@ func getTableColumns(ctx context.Context, tx *sql.Tx, tableName string) (map[str
 		if err := rows.Scan(&cid, &name, &colType, &notnull, &dfltVal, &pk); err != nil {
 			return nil, fmt.Errorf("读取表 %s 列信息: %w", tableName, err)
 		}
-		cols[name] = tableColumn{name: name, notnull: notnull, pk: pk}
+		if colType != "TEXT" && colType != "INTEGER" {
+			return nil, fmt.Errorf("不支持的数据库结构: %s.%s 类型为 %s", tableName, name, colType)
+		}
+		if (name == "sequence" || name == "steps") != (colType == "INTEGER") {
+			return nil, fmt.Errorf("不支持的数据库结构: %s.%s 类型不符", tableName, name)
+		}
+		cols[name] = tableColumn{pk: pk}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("遍历表 %s 列信息: %w", tableName, err)
@@ -49,60 +107,8 @@ func getTableColumns(ctx context.Context, tx *sql.Tx, tableName string) (map[str
 	return cols, nil
 }
 
-// initSchema 检查数据库版本并初始化或迁移表结构。
-func (s *Store) initSchema(ctx context.Context) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("开启数据库初始化事务: %w", err)
-	}
-	defer tx.Rollback()
-
-	var version int
-	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return fmt.Errorf("读取数据库版本: %w", err)
-	}
-
-	if version > CurrentSchemaVersion {
-		return fmt.Errorf("数据库版本 %d 高于当前程序支持的版本 %d", version, CurrentSchemaVersion)
-	}
-
-	// 检查已有数据表
-	rows, err := tx.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
-	if err != nil {
-		return fmt.Errorf("检查已有数据表: %w", err)
-	}
-	defer rows.Close()
-
-	existingTables := make(map[string]bool)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return fmt.Errorf("读取表名: %w", err)
-		}
-		existingTables[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("遍历表名失败: %w", err)
-	}
-
-	// 空库情况
-	if len(existingTables) == 0 {
-		if version != 0 {
-			return fmt.Errorf("不支持的数据库结构: 数据库为空但版本为 %d", version)
-		}
-		if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
-			return fmt.Errorf("执行建表与索引语句: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", CurrentSchemaVersion)); err != nil {
-			return fmt.Errorf("设置数据库版本号: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("提交数据库初始化事务: %w", err)
-		}
-		return nil
-	}
-
-	// 非空库：严格校验表和已知结构
+// migrateDatabase 校验已有数据库结构，并在受支持的旧版本上执行向当前版本的升级与数据回填。
+func migrateDatabase(ctx context.Context, tx *sql.Tx, version int, existingTables map[string]bool) error {
 	knownTables := map[string]bool{
 		"sessions":        true,
 		"runs":            true,
@@ -169,35 +175,34 @@ func (s *Store) initSchema(ctx context.Context) error {
 			return fmt.Errorf("不支持的数据库结构: tool_executions 表缺少列 %q", req)
 		}
 	}
-	if toolExecCols["assistant_entry_id"].pk == 0 || toolExecCols["tool_call_id"].pk == 0 {
+	if toolExecCols["assistant_entry_id"].pk != 1 || toolExecCols["tool_call_id"].pk != 2 {
 		return fmt.Errorf("不支持的数据库结构: tool_executions 表主键不符")
 	}
 
 	if version == CurrentSchemaVersion {
-		// 校验当前版本必需的关联字段
 		if _, ok := entriesCols["assistant_entry_id"]; !ok {
 			return fmt.Errorf("不支持的数据库结构: 版本为 %d 但 entries 缺少 assistant_entry_id", CurrentSchemaVersion)
 		}
 		if _, ok := entriesCols["tool_call_id"]; !ok {
 			return fmt.Errorf("不支持的数据库结构: 版本为 %d 但 entries 缺少 tool_call_id", CurrentSchemaVersion)
 		}
-		return nil
+		return ensureSchemaConstraints(ctx, tx)
 	}
 
-	// 执行从旧版本（version < CurrentSchemaVersion）向 v2 的迁移
+	// 执行从旧版本（version < CurrentSchemaVersion）向 v2 的升级
 	if _, ok := entriesCols["assistant_entry_id"]; !ok {
-		if _, err := tx.ExecContext(ctx, "ALTER TABLE entries ADD COLUMN assistant_entry_id TEXT REFERENCES entries(id)"); err != nil {
+		if _, err := tx.ExecContext(ctx, sessql.AddEntriesAssistantEntryIDColumnSQL); err != nil {
 			return fmt.Errorf("添加 entries.assistant_entry_id 列失败: %w", err)
 		}
 	}
 	if _, ok := entriesCols["tool_call_id"]; !ok {
-		if _, err := tx.ExecContext(ctx, "ALTER TABLE entries ADD COLUMN tool_call_id TEXT"); err != nil {
+		if _, err := tx.ExecContext(ctx, sessql.AddEntriesToolCallIDColumnSQL); err != nil {
 			return fmt.Errorf("添加 entries.tool_call_id 列失败: %w", err)
 		}
 	}
 
 	// 回填已有工具结果的关联字段
-	toolEntryRows, err := tx.QueryContext(ctx, "SELECT id, session_id, run_id, message_json FROM entries WHERE assistant_entry_id IS NULL")
+	toolEntryRows, err := tx.QueryContext(ctx, sessql.SelectUnassignedToolEntriesSQL)
 	if err != nil {
 		return fmt.Errorf("查询待回填的 entries: %w", err)
 	}
@@ -224,7 +229,7 @@ func (s *Store) initSchema(ctx context.Context) error {
 
 	assignedPairs := make(map[string]string)
 	for _, pe := range pending {
-		msg, err := decodeMessage([]byte(pe.messageJSON))
+		msg, err := config.DecodeMessage([]byte(pe.messageJSON))
 		if err != nil {
 			return fmt.Errorf("解析 entry %s 消息失败: %w", pe.id, err)
 		}
@@ -239,7 +244,7 @@ func (s *Store) initSchema(ctx context.Context) error {
 
 		var candidateAsstID string
 		// 先按结果 ID 查找，不能把调用 ID 冲突或重复关联当成无启动记录。
-		execRows, err := tx.QueryContext(ctx, "SELECT session_id, run_id, assistant_entry_id, tool_call_id FROM tool_executions WHERE result_entry_id = ? LIMIT 2", pe.id)
+		execRows, err := tx.QueryContext(ctx, sessql.SelectToolExecutionForMigrationSQL, pe.id)
 		if err != nil {
 			return fmt.Errorf("查询工具执行记录失败: %w", err)
 		}
@@ -272,11 +277,11 @@ func (s *Store) initSchema(ctx context.Context) error {
 			candidateAsstID = execAsstID
 			// assistant 必须与执行记录和工具结果处于同一 Run。
 			var asstMsgJSON string
-			err = tx.QueryRowContext(ctx, "SELECT message_json FROM entries WHERE id = ? AND session_id = ? AND run_id = ?", candidateAsstID, pe.sessionID, pe.runID).Scan(&asstMsgJSON)
+			err = tx.QueryRowContext(ctx, sessql.SelectAssistantForMigrationSQL, candidateAsstID, pe.sessionID, pe.runID).Scan(&asstMsgJSON)
 			if err != nil {
 				return fmt.Errorf("执行记录指向的 assistant %s 不存在: %w", candidateAsstID, err)
 			}
-			asstDecoded, err := decodeMessage([]byte(asstMsgJSON))
+			asstDecoded, err := config.DecodeMessage([]byte(asstMsgJSON))
 			if err != nil {
 				return fmt.Errorf("解码 assistant %s 消息失败: %w", candidateAsstID, err)
 			}
@@ -297,8 +302,8 @@ func (s *Store) initSchema(ctx context.Context) error {
 				return fmt.Errorf("assistant %s 包含重复的 tool_call_id %s", candidateAsstID, toolCallID)
 			}
 		} else {
-			// 2. 若无启动记录，在同 Run 中查找包含该 ToolCallID 的 assistant
-			asstRows, err := tx.QueryContext(ctx, "SELECT id, message_json FROM entries WHERE session_id = ? AND run_id = ?", pe.sessionID, pe.runID)
+			// 若无启动记录，在同 Run 中查找包含该 ToolCallID 的 assistant
+			asstRows, err := tx.QueryContext(ctx, sessql.SelectCandidateAssistantsSQL, pe.sessionID, pe.runID)
 			if err != nil {
 				return fmt.Errorf("查询候选 assistant 失败: %w", err)
 			}
@@ -309,7 +314,7 @@ func (s *Store) initSchema(ctx context.Context) error {
 					asstRows.Close()
 					return fmt.Errorf("读取候选 assistant 行: %w", err)
 				}
-				candDecoded, err := decodeMessage([]byte(aJSON))
+				candDecoded, err := config.DecodeMessage([]byte(aJSON))
 				if err != nil {
 					asstRows.Close()
 					return fmt.Errorf("解码候选 entry %s 消息失败: %w", aID, err)
@@ -348,24 +353,99 @@ func (s *Store) initSchema(ctx context.Context) error {
 		}
 		assignedPairs[key] = pe.id
 
-		_, err = tx.ExecContext(ctx, "UPDATE entries SET assistant_entry_id = ?, tool_call_id = ? WHERE id = ?", candidateAsstID, toolCallID, pe.id)
+		_, err = tx.ExecContext(ctx, sessql.UpdateBackfilledToolEntrySQL, candidateAsstID, toolCallID, pe.id)
 		if err != nil {
 			return fmt.Errorf("回填工具结果 entry %s 失败: %w", pe.id, err)
 		}
 	}
 
-	// 创建唯一约束索引
-	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS entries_assistant_tool_call ON entries(assistant_entry_id, tool_call_id) WHERE assistant_entry_id IS NOT NULL AND tool_call_id IS NOT NULL;`); err != nil {
-		return fmt.Errorf("创建工具结果唯一索引失败: %w", err)
+	// 补齐普通索引并核验约束，失败时回滚整个迁移。
+	if err := ensureSchemaConstraints(ctx, tx); err != nil {
+		return err
 	}
 
 	// 更新版本号
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", CurrentSchemaVersion)); err != nil {
+	if _, err := tx.ExecContext(ctx, sessql.SetUserVersionV2SQL); err != nil {
 		return fmt.Errorf("更新数据库版本号失败: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("提交数据库迁移事务: %w", err)
-	}
 	return nil
+}
+
+// ensureSchemaConstraints 补齐已知索引，拒绝缺少外键、唯一约束或同名错误索引的结构。
+func ensureSchemaConstraints(ctx context.Context, tx *sql.Tx) error {
+	foreignKeys := map[string]map[string]string{
+		"sessions":        {"head_id": "entries.id"},
+		"runs":            {"session_id": "sessions.id", "start_head_id": "entries.id", "input_entry_id": "entries.id", "last_entry_id": "entries.id"},
+		"entries":         {"session_id": "sessions.id", "parent_id": "entries.id", "run_id": "runs.id", "assistant_entry_id": "entries.id"},
+		"tool_executions": {"session_id": "sessions.id", "run_id": "runs.id", "assistant_entry_id": "entries.id", "result_entry_id": "entries.id"},
+	}
+	for table, expected := range foreignKeys {
+		rows, err := tx.QueryContext(ctx, sessql.SelectForeignKeysSQL, table)
+		if err != nil {
+			return err
+		}
+		actual := make(map[string]string)
+		for rows.Next() {
+			var column, target, key string
+			if err := rows.Scan(&column, &target, &key); err != nil {
+				rows.Close()
+				return err
+			}
+			actual[column] = target + "." + key
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for column, target := range expected {
+			if actual[column] != target {
+				return fmt.Errorf("不支持的数据库结构: %s.%s 外键不符", table, column)
+			}
+		}
+	}
+	var uniqueSequence bool
+	if err := tx.QueryRowContext(ctx, sessql.SelectSequenceConstraintSQL).Scan(&uniqueSequence); err != nil {
+		return err
+	}
+	if !uniqueSequence {
+		return fmt.Errorf("不支持的数据库结构: 缺少会话 Sequence 唯一约束")
+	}
+	if _, err := tx.ExecContext(ctx, sessql.CreateIndexesSQL); err != nil {
+		return fmt.Errorf("补齐索引: %w", err)
+	}
+	for _, index := range []struct {
+		table, name, columns string
+		unique, partial      bool
+	}{
+		{"runs", "runs_session_started", "session_id,started_at,id", false, false},
+		{"entries", "entries_run_sequence", "run_id,sequence", false, false},
+		{"tool_executions", "tool_executions_run", "run_id", false, false},
+		{"entries", "entries_assistant_tool_call", "assistant_entry_id,tool_call_id", true, true},
+	} {
+		var columns, definition string
+		var unique, partial bool
+		if err := tx.QueryRowContext(ctx, sessql.SelectIndexDefinitionSQL, index.name, index.name, index.table, index.name).Scan(&columns, &unique, &partial, &definition); err != nil {
+			return err
+		}
+		if columns != index.columns || unique != index.unique || partial != index.partial {
+			return fmt.Errorf("不支持的数据库结构: 索引 %s 定义不符", index.name)
+		}
+		if index.partial {
+			normalized := strings.Join(strings.Fields(strings.ToLower(definition)), " ")
+			if !strings.HasSuffix(strings.TrimSuffix(normalized, ";"), "where assistant_entry_id is not null and tool_call_id is not null") {
+				return fmt.Errorf("不支持的数据库结构: 工具结果索引条件不符")
+			}
+		}
+	}
+	rows, err := tx.QueryContext(ctx, sessql.CheckForeignKeysSQL)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return fmt.Errorf("数据库存在失效的外键关联")
+	}
+	return rows.Err()
 }

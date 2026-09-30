@@ -45,7 +45,7 @@ type AssistantMessage struct {
 	Usage         Usage
 	State         MessageState
 	StopReason    StopReason
-	//未加工过的错误原因
+	//未加工过的停止原因
 	RawStopReason string
 	ErrorMessage  string
 	Timestamp     time.Time

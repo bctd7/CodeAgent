@@ -46,6 +46,13 @@ func (t *diagnosticTransport) RoundTrip(req *http.Request) (*http.Response, erro
 		return nil, err
 	}
 	fmt.Printf("<<< [HTTP 响应状态] HTTP %d %s\n", resp.StatusCode, resp.Status)
+	if resp.StatusCode >= 400 && resp.Body != nil {
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			fmt.Printf("<<< [HTTP 错误响应体] %s\n", string(respBody))
+			resp.Body = io.NopCloser(bytes.NewReader(respBody))
+		}
+	}
 	return resp, nil
 }
 

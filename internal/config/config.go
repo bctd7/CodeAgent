@@ -10,7 +10,7 @@ import (
 	"CodeAgent/internal/llm"
 )
 
-// Config 是 CodeAgent 的配置结构体。
+// Config 是 CodeAgent 的配置结构体。 主要服务于toml文件 用于选择和配置模型
 type Config struct {
 	Providers map[string]ProviderConfig `toml:"providers"`
 }

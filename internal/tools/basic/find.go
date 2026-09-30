@@ -22,6 +22,8 @@ const (
 	defaultFindLimit = 1000
 )
 
+//已阅读
+
 var findSchema = []byte(`{
   "type": "object",
   "properties": {
@@ -57,6 +59,7 @@ func NewFindTool(workingDir string) agent.Tool {
 	}
 }
 
+// 查找的内容 搜索的起始目录 最多返回多少项
 func parseFindArgs(args map[string]any) (pattern, pathStr string, limitVal int, err error) {
 	patternVal, exists := args["pattern"]
 	if !exists {
@@ -143,17 +146,20 @@ func executeFind(ctx context.Context, workingDir string, args map[string]any) ([
 		}
 		cur = parent
 	}
-
+	// --glob 按照通配符 *.xx的模式查找
 	cmdArgs := []string{"--glob", "--color=never", "--hidden"}
 	if !insideGitRepo {
+		//即使不在git当中，如果带有gitignore，也按照这个规则查找
 		cmdArgs = append(cmdArgs, "--no-require-git")
 	}
+
 	cmdArgs = append(cmdArgs, "--max-results", strconv.Itoa(effectiveLimit))
 
 	effectivePattern := pattern
 	if strings.Contains(pattern, "/") {
+		//有/代表匹配目录路径
 		cmdArgs = append(cmdArgs, "--full-path")
-		if !strings.HasPrefix(pattern, "/") && !strings.HasPrefix(pattern, "**/") && pattern != "**" {
+		if !strings.HasPrefix(pattern, "/") && !strings.HasPrefix(pattern, "**/") {
 			effectivePattern = "**/" + pattern
 		}
 		if runtime.GOOS == "windows" {
@@ -193,6 +199,7 @@ func executeFind(ctx context.Context, workingDir string, args map[string]any) ([
 		escaped := escapeControlChars(rel)
 
 		lineBytes := len(escaped)
+		//换行符
 		if len(lines) > 0 {
 			lineBytes++
 		}

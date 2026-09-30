@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"CodeAgent/internal/agent"
-	implements "CodeAgent/internal/tools/basic/implements"
 )
 
 // Config 定义基础工具集合所需的运行配置。
@@ -45,13 +44,13 @@ func New(cfg Config) ([]agent.Tool, error) {
 		return nil, fmt.Errorf("解析工作目录绝对路径失败: %w", err)
 	}
 
-	editTool := implements.NewEditTool(absWd)
-	findTool := implements.NewFindTool(absWd)
-	grepTool := implements.NewGrepTool(absWd)
-	readTool := implements.NewReadTool(absWd)
-	writeTool := implements.NewWriteTool(absWd)
-	lsTool := implements.NewLsTool(absWd)
-	shellTool := implements.NewShellTool(absWd)
+	editTool := NewEditTool(absWd)
+	findTool := NewFindTool(absWd)
+	grepTool := NewGrepTool(absWd)
+	readTool := NewReadTool(absWd)
+	writeTool := NewWriteTool(absWd)
+	lsTool := NewLsTool(absWd)
+	shellTool := NewShellTool(absWd)
 
 	return []agent.Tool{editTool, findTool, grepTool, readTool, writeTool, lsTool, shellTool}, nil
 }

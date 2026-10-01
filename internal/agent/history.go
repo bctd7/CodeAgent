@@ -7,8 +7,8 @@ import (
 	"CodeAgent/internal/llm"
 )
 
-// modelOrigin 记录消息产生时的具体模型来源与端点，用于思考块同源性精准核验。
-type modelOrigin struct {
+// ModelOrigin 记录消息产生时的具体模型来源与端点，用于思考块同源性精准核验。
+type ModelOrigin struct {
 	Provider string
 	API      llm.APIKind
 	ModelID  string
@@ -23,7 +23,7 @@ func prepareRequestHistory(
 	tools []llm.Tool,
 	options llm.RequestOptions,
 	systemPrompt string,
-	originMap map[*llm.AssistantMessage]modelOrigin,
+	originMap map[*llm.AssistantMessage]ModelOrigin,
 ) (llm.Request, error) {
 	prepared := make([]llm.Message, 0, len(history))
 	for i := 0; i < len(history); i++ {
@@ -141,7 +141,7 @@ func pairToolResults(toolCalls []llm.ContentBlock, toolResults []*llm.ToolResult
 func projectAssistantThinking(
 	m *llm.AssistantMessage,
 	targetModel llm.Model,
-	originMap map[*llm.AssistantMessage]modelOrigin,
+	originMap map[*llm.AssistantMessage]ModelOrigin,
 ) (*llm.AssistantMessage, bool) {
 	origin, hasOrigin := originMap[m]
 	sameOrigin := hasOrigin &&

@@ -70,6 +70,10 @@ func (a *Agent) cancelHandle(h *RunHandle) {
 	activeID := ""
 
 	if a.currentRun != nil && a.currentRun.id == h.id {
+		if a.currentRun.finishing {
+			a.mu.Unlock()
+			return
+		}
 		a.currentRun.cancel()
 		a.status = AgentStatusCancelling
 		droppedSteers = a.steerQueue
@@ -91,37 +95,24 @@ func (a *Agent) cancelHandle(h *RunHandle) {
 // cancelAllHandles 取消全部现有任务，私有方法，自己管理锁和通知。
 func (a *Agent) cancelAllHandles() {
 	a.mu.Lock()
+	a.status = AgentStatusClosed
 	activeID := ""
 	if a.currentRun != nil {
 		activeID = a.currentRun.id
 		a.currentRun.cancel()
-		if a.status != AgentStatusClosed {
-			a.status = AgentStatusCancelling
-		}
 	}
-
-	reason := "任务在排队时被用户取消"
-	if a.status == AgentStatusClosed {
-		reason = "Agent 已关闭"
-	}
-	droppedTasks := a.dropAllQueuedLocked(reason)
-
-	droppedSteers := a.steerQueue
+	dropped := a.dropAllQueuedLocked("Agent 已关闭")
+	steers := a.steerQueue
 	a.steerQueue = nil
+	// 不调用外部回调；工作循环退出前所有排队句柄已就绪。
+	a.enqueueDroppedTasks(dropped)
+	for _, text := range steers {
+		a.dispatcher.enqueue(Event{Kind: EventInputDropped, RunID: activeID, Detail: "Agent 已关闭，未消费纠正被丢弃: " + text})
+	}
 	a.mu.Unlock()
-
-	// 解锁后唤醒工作循环
 	select {
 	case a.workNotify <- struct{}{}:
 	default:
-	}
-
-	// 锁外执行通知
-	if len(droppedTasks) > 0 {
-		a.notifyDroppedTasks(droppedTasks)
-	}
-	if len(droppedSteers) > 0 {
-		a.notifyDroppedSteers(activeID, droppedSteers)
 	}
 }
 

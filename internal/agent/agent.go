@@ -12,7 +12,12 @@ import (
 // Agent 是会话执行核心，负责内存历史维护、后台任务循环、工具调度。Loop才是真正的循环调度。
 // 纠正排队、任务取消以及跨模型跨协议切换。
 type Agent struct {
-	mu sync.Mutex
+	mu            sync.Mutex
+	boundary      chan struct{}
+	recorder      Recorder
+	newRunID      func() string
+	recordTimeout time.Duration
+	recordingErr  error
 
 	// 配置与依赖
 	stream       StreamFunc
@@ -30,7 +35,7 @@ type Agent struct {
 
 	// 会话内存历史与思考同源记录
 	history       []llm.Message
-	messageOrigin map[*llm.AssistantMessage]modelOrigin
+	messageOrigin map[*llm.AssistantMessage]ModelOrigin
 
 	// 运行状态与队列
 	status     AgentStatus
@@ -71,7 +76,14 @@ func New(cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("工具配置非法: %w", err)
 	}
 
+	if cfg.RecordTimeout < 0 {
+		return nil, fmt.Errorf("RecordTimeout 不能为负数")
+	}
+	if cfg.RecordTimeout == 0 {
+		cfg.RecordTimeout = defaultRecordTimeout
+	}
 	a := &Agent{
+		boundary: make(chan struct{}, 1), recorder: cfg.Recorder, newRunID: cfg.NewRunID, recordTimeout: cfg.RecordTimeout,
 		stream:           cfg.Stream,
 		systemPrompt:     cfg.SystemPrompt,
 		tools:            toolMap,
@@ -81,11 +93,14 @@ func New(cfg Config) (*Agent, error) {
 		currentOptions:   cfg.Options,
 		status:           AgentStatusIdle,
 		history:          copyHistory(cfg.InitialHistory),
-		messageOrigin:    make(map[*llm.AssistantMessage]modelOrigin),
+		messageOrigin:    make(map[*llm.AssistantMessage]ModelOrigin),
 		queue:            make([]*queuedRun, 0),
 		workNotify:       make(chan struct{}, 1),
 		done:             make(chan struct{}),
 		dispatcher:       newEventDispatcher(cfg.OnEvent),
+	}
+	for msg, origin := range cfg.InitialOrigins {
+		a.messageOrigin[msg] = origin
 	}
 	go a.runLoop()
 	return a, nil
@@ -109,8 +124,16 @@ func (a *Agent) Submit(ctx context.Context, message *llm.UserMessage) (*RunHandl
 		return nil, fmt.Errorf("Agent 已关闭，不接受新任务")
 	}
 
+	if a.recordingErr != nil {
+		err := a.recordingErr
+		a.mu.Unlock()
+		return nil, err
+	}
 	a.runCounter++
 	runID := fmt.Sprintf("run_%d", a.runCounter)
+	if a.newRunID != nil {
+		runID = a.newRunID()
+	}
 	handle := newRunHandle(runID, a)
 	queuePos := a.enqueueRunLocked(runID, handle, ctx, message)
 	// 与任务接受一起入队，后台才能始终先观察到 InputReceived。
@@ -140,7 +163,7 @@ func (a *Agent) Steer(message string) error {
 		a.mu.Unlock()
 		return fmt.Errorf("Agent 已关闭")
 	}
-	if a.currentRun == nil || a.status != AgentStatusRunning {
+	if a.currentRun == nil || a.currentRun.finishing || a.status != AgentStatusRunning {
 		a.mu.Unlock()
 		return fmt.Errorf("没有活动的 Run，无法提交纠正")
 	}
@@ -160,30 +183,53 @@ func (a *Agent) Steer(message string) error {
 
 // SetModel 请求切换模型及请求选项；由 Agent 在规定边界应用。
 func (a *Agent) SetModel(model llm.Model, options llm.RequestOptions) error {
-	a.mu.Lock()
-	if a.status == AgentStatusClosed {
-		a.mu.Unlock()
-		return fmt.Errorf("Agent 已关闭")
-	}
+	return a.SetModelWithPersistence(context.Background(), model, options, nil)
+}
 
+// SetModelWithPersistence 固定请求准备边界，在锁外保存配置，然后原子更新选择。
+// save 失败时原选择保持不变；外部事件在释放边界后分发。
+func (a *Agent) SetModelWithPersistence(ctx context.Context, model llm.Model, options llm.RequestOptions, save func(context.Context) error) error {
+	select {
+	case a.boundary <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	a.mu.Lock()
+	if a.status == AgentStatusClosed || a.recordingErr != nil {
+		err := a.recordingErr
+		if err == nil {
+			err = fmt.Errorf("Agent 已关闭")
+		}
+		a.mu.Unlock()
+		<-a.boundary
+		return err
+	}
+	a.mu.Unlock()
+	if save != nil {
+		if err := save(ctx); err != nil {
+			<-a.boundary
+			return err
+		}
+	}
+	a.mu.Lock()
+	// Close 可与数据库保存并行；调用方将不一致实例置为故障并关闭。
+	if a.status == AgentStatusClosed || a.recordingErr != nil {
+		a.mu.Unlock()
+		<-a.boundary
+		return fmt.Errorf("模型选择保存后 Agent 已不可用")
+	}
 	a.pendingModel = &model
 	a.pendingOptions = &options
-
-	activeRunID := ""
+	runID := ""
 	if a.currentRun != nil {
-		activeRunID = a.currentRun.id
+		runID = a.currentRun.id
 	}
-
-	a.dispatcher.enqueue(Event{
-		Kind:      EventModelSwitchRequested,
-		RunID:     activeRunID,
-		Detail:    fmt.Sprintf("请求切换模型至: %s (%s)", model.ID, model.API),
-		Timestamp: time.Now(),
-	})
+	a.dispatcher.enqueue(Event{Kind: EventModelSwitchRequested, RunID: runID, Detail: fmt.Sprintf("请求切换模型至: %s (%s)", model.ID, model.API)})
 	if a.currentRun == nil && a.status == AgentStatusIdle {
 		a.changeModel()
 	}
 	a.mu.Unlock()
+	<-a.boundary
 	a.dispatcher.drain()
 	return nil
 }
@@ -221,16 +267,17 @@ func (a *Agent) Snapshot() Snapshot {
 // 使用约定：外部事件回调（OnEvent）中同步调用阻塞式 Close() 或同步等待当前 Run
 // 可能与工作循环形成相互等待环；外部消费者如需在收到事件后关闭实例，应另启 goroutine 执行。
 func (a *Agent) Close() error {
-	a.closeOnce.Do(func() {
-		a.mu.Lock()
-		a.status = AgentStatusClosed
-		a.mu.Unlock()
-
-		a.cancelAllHandles()
-	})
-
+	a.RequestClose()
 	<-a.done
 	return nil
+}
+
+// RequestClose 停止准入并请求收尾，不等待工作循环。
+func (a *Agent) RequestClose() {
+	a.closeOnce.Do(func() {
+		a.cancelAllHandles()
+		go a.dispatcher.drain()
+	})
 }
 
 // watchRunContext 从提交到结束监听本次任务的 Context 取消。

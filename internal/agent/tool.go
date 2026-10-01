@@ -120,6 +120,7 @@ type toolScheduler struct {
 	tools            map[string]Tool
 	maxParallelTools int
 	calls            []llm.ContentBlock
+	assistantID      string
 
 	mu         sync.Mutex
 	stopped    bool
@@ -128,9 +129,10 @@ type toolScheduler struct {
 	results    []*llm.ToolResultMessage
 }
 
-func newToolScheduler(a *Agent, r *activeRun, stepIndex int, calls []llm.ContentBlock) *toolScheduler {
+func newToolScheduler(a *Agent, r *activeRun, stepIndex int, calls []llm.ContentBlock, assistantID string) *toolScheduler {
 	return &toolScheduler{
 		agent:            a,
+		assistantID:      assistantID,
 		run:              r,
 		stepIndex:        stepIndex,
 		tools:            a.tools,
@@ -249,15 +251,6 @@ func (s *toolScheduler) executeToolCall(item toolCallItem) {
 		return
 	}
 
-	s.agent.dispatcher.emit(Event{
-		Kind:       EventToolStart,
-		RunID:      s.run.id,
-		StepIndex:  s.stepIndex,
-		ToolCallID: call.ID,
-		ToolName:   call.Name,
-		Detail:     fmt.Sprintf("工具调用开始: %s", call.Name),
-	})
-
 	var blocks []llm.ContentBlock
 	var isError bool
 
@@ -267,6 +260,25 @@ func (s *toolScheduler) executeToolCall(item toolCallItem) {
 		}
 		isError = true
 	} else {
+		if s.agent.recorder != nil {
+			ctx, cancel := s.agent.cleanupContext()
+			err := s.agent.recorder.RecordToolStart(ctx, s.assistantID, call.ID)
+			cancel()
+			if err != nil {
+				s.agent.recordingFailure(s.run, err)
+				s.recordStop("因持久化失败而未执行")
+				return
+			}
+		}
+		s.agent.dispatcher.emit(Event{
+			Kind:       EventToolStart,
+			RunID:      s.run.id,
+			StepIndex:  s.stepIndex,
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			Detail:     fmt.Sprintf("工具调用开始: %s", call.Name),
+		})
+
 		var execErr error
 		var panicVal any
 		blocks, execErr, panicVal = s.invokeTool(call, item.tool)
@@ -303,6 +315,7 @@ func (s *toolScheduler) executeToolCall(item toolCallItem) {
 	s.results[item.index] = res
 	s.mu.Unlock()
 
+	s.saveResult(res)
 	s.agent.dispatcher.emit(Event{
 		Kind:       EventToolEnd,
 		RunID:      s.run.id,
@@ -364,6 +377,7 @@ func (s *toolScheduler) fillSkippedResults() {
 			IsError:   true,
 			Timestamp: time.Now(),
 		}
+		s.saveResult(s.results[i])
 		s.agent.dispatcher.emit(Event{
 			Kind:       EventToolSkipped,
 			RunID:      s.run.id,
@@ -372,5 +386,18 @@ func (s *toolScheduler) fillSkippedResults() {
 			ToolName:   call.Name,
 			Detail:     reason,
 		})
+	}
+}
+
+// saveResult 在每个工具完成时保存，不等待同组慢工具。
+func (s *toolScheduler) saveResult(result *llm.ToolResultMessage) {
+	if s.agent.recorder == nil {
+		return
+	}
+	ctx, cancel := s.agent.cleanupContext()
+	defer cancel()
+	if err := s.agent.recorder.AppendToolResult(ctx, s.assistantID, result); err != nil {
+		s.agent.recordingFailure(s.run, err)
+		s.recordStop("因持久化失败而未执行")
 	}
 }

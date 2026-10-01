@@ -19,6 +19,8 @@ type activeRun struct {
 	messages   []llm.Message
 	usage      map[string]llm.Usage
 	totalUsage llm.Usage
+	persisted  bool
+	finishing  bool
 }
 
 // runLoop 后台工作主循环，作为关闭收尾的唯一负责人。
@@ -27,13 +29,16 @@ func (a *Agent) runLoop() {
 	defer close(a.done)
 
 	for {
+		a.boundary <- struct{}{}
 		a.mu.Lock()
 		if a.status == AgentStatusClosed {
 			a.mu.Unlock()
+			<-a.boundary
 			return
 		}
 		run, skipped := a.popNextRunLocked()
 		a.mu.Unlock()
+		<-a.boundary
 		a.notifyDroppedTasks(skipped)
 
 		if run != nil {
@@ -49,6 +54,18 @@ func (a *Agent) runLoop() {
 func (a *Agent) executeRun(run *activeRun) {
 	defer run.cancel()
 
+	if a.recorder != nil {
+		ctx, cancel := a.cleanupContext()
+		err := a.recorder.StartRun(ctx, run.id, run.userMsg)
+		cancel()
+		if err != nil {
+			a.recordingFailure(run, err)
+			a.mu.Lock()
+			a.finishRunAndUnlock(run, RunResult{}, nil)
+			return
+		}
+		run.persisted = true
+	}
 	a.dispatcher.emit(Event{
 		Kind:      EventRunStart,
 		RunID:     run.id,
@@ -63,9 +80,11 @@ func (a *Agent) executeRun(run *activeRun) {
 
 	// 工具结果加入历史后继续当前 Run；收尾时返回外层，由 runLoop 取下一个任务。
 	for {
+		a.boundary <- struct{}{}
 		// 1. 检查取消与关闭
 		a.mu.Lock()
 		if a.status == AgentStatusClosed || a.status == AgentStatusCancelling || run.ctx.Err() != nil {
+			<-a.boundary
 			a.finishRunAndUnlock(run, RunResult{}, nil)
 			return
 		}
@@ -74,14 +93,38 @@ func (a *Agent) executeRun(run *activeRun) {
 		if a.pendingModel != nil {
 			a.changeModel()
 			a.mu.Unlock()
+			<-a.boundary
 			a.dispatcher.drain()
 			// 回调可能提交新目标或取消任务，重新检查后再准备请求。
 			continue
 		}
 
-		// 3. 准备本次模型请求（消费待处理纠正并推进步骤）
+		// 已消费纠正先保存，再进入本次模型请求。
+		steers := a.steerQueue
+		a.steerQueue = nil
+		a.mu.Unlock()
+		for _, text := range steers {
+			msg := &llm.UserMessage{Role: llm.RoleUser, Content: []llm.ContentBlock{{Type: llm.TypeText, Text: "[用户纠正]: " + text}}, Timestamp: time.Now()}
+			if _, err := a.appendRecordedMessage(run, msg, nil); err != nil {
+				a.mu.Lock()
+				<-a.boundary
+				a.finishRunAndUnlock(run, RunResult{}, nil)
+				return
+			}
+			a.mu.Lock()
+			a.history = append(a.history, msg)
+			run.messages = append(run.messages, msg)
+			a.mu.Unlock()
+		}
+		a.mu.Lock()
+		if run.ctx.Err() != nil {
+			<-a.boundary
+			a.finishRunAndUnlock(run, RunResult{}, nil)
+			return
+		}
 		req, stepIndex, currentModel, err := a.prepareRequest(run)
 		if err != nil {
+			<-a.boundary
 			a.finishRunAndUnlock(run, RunResult{
 				State:        RunStateError,
 				ErrorMessage: fmt.Sprintf("准备模型请求失败: %v", err),
@@ -90,7 +133,22 @@ func (a *Agent) executeRun(run *activeRun) {
 			return
 		}
 		a.mu.Unlock()
+		<-a.boundary
 
+		if a.recorder != nil {
+			ctx, cancel := a.cleanupContext()
+			err := a.recorder.RecordStep(ctx, run.id)
+			cancel()
+			if err != nil {
+				a.recordingFailure(run, err)
+				a.mu.Lock()
+				a.finishRunAndUnlock(run, RunResult{}, nil)
+				return
+			}
+		}
+		a.mu.Lock()
+		run.steps++
+		a.mu.Unlock()
 		a.dispatcher.emit(Event{
 			Kind:      EventStepStart,
 			RunID:     run.id,
@@ -121,7 +179,15 @@ func (a *Agent) executeRun(run *activeRun) {
 		assistantMsg := streamResult.Message
 
 		// 5. 集中记录模型最终消息、同源来源与用量
+		origin := ModelOrigin{Provider: currentModel.Provider, API: currentModel.API, ModelID: currentModel.ID, BaseURL: currentModel.BaseURL}
+		assistantID, recordErr := a.appendRecordedMessage(run, &assistantMsg, &origin)
 		a.recordResponseAndUsage(run, currentModel, &assistantMsg)
+		if recordErr != nil {
+			stepEnd := Event{Kind: EventStepEnd, RunID: run.id, StepIndex: stepIndex, Detail: recordErr.Error()}
+			a.mu.Lock()
+			a.finishRunAndUnlock(run, RunResult{}, &stepEnd)
+			return
+		}
 
 		// 6. 处理取消终态
 		if run.ctx.Err() != nil || assistantMsg.State == llm.StateAborted {
@@ -260,7 +326,7 @@ func (a *Agent) executeRun(run *activeRun) {
 		}
 
 		// 11. 调度执行工具
-		scheduler := newToolScheduler(a, run, stepIndex, toolCalls)
+		scheduler := newToolScheduler(a, run, stepIndex, toolCalls, assistantID)
 		results, panicErr := scheduler.execute()
 
 		// 工具结果严格按模型原始调用顺序追加至历史
@@ -304,21 +370,6 @@ func (a *Agent) executeRun(run *activeRun) {
 
 // prepareRequest 在持有 a.mu 时消费待处理纠正、投影请求并推进步骤计数。
 func (a *Agent) prepareRequest(run *activeRun) (llm.Request, int, llm.Model, error) {
-	if len(a.steerQueue) > 0 {
-		steers := a.steerQueue
-		a.steerQueue = nil
-		for _, st := range steers {
-			steerMsg := &llm.UserMessage{
-				Role: llm.RoleUser,
-				Content: []llm.ContentBlock{
-					{Type: llm.TypeText, Text: "[用户纠正]: " + st},
-				},
-				Timestamp: time.Now(),
-			}
-			a.history = append(a.history, steerMsg)
-			run.messages = append(run.messages, steerMsg)
-		}
-	}
 	req, err := prepareRequestHistory(
 		a.history,
 		a.currentModel,
@@ -330,8 +381,7 @@ func (a *Agent) prepareRequest(run *activeRun) (llm.Request, int, llm.Model, err
 	if err != nil {
 		return llm.Request{}, 0, a.currentModel, err
 	}
-	run.steps++
-	return req, run.steps, a.currentModel, nil
+	return req, run.steps + 1, a.currentModel, nil
 }
 
 // callStreamAndForward 调用底层模型建流并实时转发流式事件，流关闭由 defer 保证。
@@ -394,6 +444,35 @@ func (a *Agent) finishRunAndUnlock(run *activeRun, result RunResult, stepEnd *Ev
 		}
 	}
 
+	run.finishing = true
+	a.mu.Unlock()
+	if a.recorder != nil && run.persisted {
+		ctx, cancel := a.cleanupContext()
+		// 故障原因先进入尽力保存的任务结果。
+		a.mu.Lock()
+		storageErr := a.recordingErr
+		a.mu.Unlock()
+		if storageErr != nil {
+			result.State = RunStateError
+			result.StopReason = ""
+			result.RawStopReason = ""
+			result.ErrorMessage = storageErr.Error()
+			result.Error = storageErr
+		}
+		err := a.recorder.FinishRun(ctx, result)
+		cancel()
+		if err != nil {
+			a.recordingFailure(run, err)
+		}
+	}
+	a.mu.Lock()
+	if a.recordingErr != nil {
+		result.State = RunStateError
+		result.StopReason = ""
+		result.RawStopReason = ""
+		result.ErrorMessage = a.recordingErr.Error()
+		result.Error = a.recordingErr
+	}
 	// 成功或单任务取消后保留排队任务；失败或截断则丢弃。
 	truncated := result.State == RunStateSuccess && result.StopReason == RunStopTruncated
 	a.currentRun = nil
@@ -424,6 +503,7 @@ func (a *Agent) finishRunAndUnlock(run *activeRun, result RunResult, stepEnd *Ev
 		Detail:    fmt.Sprintf("Run 执行完成 (状态: %s)", result.State),
 		Timestamp: time.Now(),
 	})
+	a.enqueueDroppedTasks(droppedTasks)
 	a.mu.Unlock()
 	a.dispatcher.drain()
 
@@ -437,8 +517,6 @@ func (a *Agent) finishRunAndUnlock(run *activeRun, result RunResult, stepEnd *Ev
 		})
 	}
 
-	// 为被清理的排队任务保存结果并通知等待者。
-	a.notifyDroppedTasks(droppedTasks)
 }
 
 // 切换模型并且发布event
@@ -459,7 +537,7 @@ func (a *Agent) recordResponseAndUsage(run *activeRun, model llm.Model, msg *llm
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.messageOrigin[msg] = modelOrigin{
+	a.messageOrigin[msg] = ModelOrigin{
 		Provider: model.Provider,
 		API:      model.API,
 		ModelID:  model.ID,

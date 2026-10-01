@@ -61,6 +61,11 @@ func (a *Agent) notifyDroppedSteers(runID string, droppedSteers []string) {
 
 // notifyDroppedTasks 解锁并通知被丢弃/取消的排队任务。调用方必须在锁外调用。
 func (a *Agent) notifyDroppedTasks(tasks []droppedTaskInfo) {
+	a.enqueueDroppedTasks(tasks)
+	a.dispatcher.drain()
+}
+
+func (a *Agent) enqueueDroppedTasks(tasks []droppedTaskInfo) {
 	for _, item := range tasks {
 		errVal := item.q.ctx.Err()
 		if errVal == nil {
@@ -73,13 +78,13 @@ func (a *Agent) notifyDroppedTasks(tasks []droppedTaskInfo) {
 			Error:        errVal,
 		}
 		item.q.handle.setResult(res)
-		a.dispatcher.emit(Event{
+		a.dispatcher.enqueue(Event{
 			Kind:      EventInputDropped,
 			RunID:     item.q.id,
 			Detail:    item.reason,
 			Timestamp: time.Now(),
 		})
-		a.dispatcher.emit(Event{
+		a.dispatcher.enqueue(Event{
 			Kind:      EventRunEnd,
 			RunID:     item.q.id,
 			Result:    &res,

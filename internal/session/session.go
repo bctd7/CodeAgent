@@ -62,6 +62,15 @@ func ValidateSessionWorkingDir(info config.SessionInfo) error {
 // 若传入非空目录，校验其存在且为目录并保存规范化绝对路径。
 // 初始 HeadID 强制为空，不创建 Run、消息或 Agent。
 func (s *Service) CreateSession(ctx context.Context, title, workingDir string) (config.SessionInfo, error) {
+	return s.createSession(ctx, title, workingDir, nil)
+}
+func (s *Service) CreateSessionWithModel(ctx context.Context, title, workingDir string, selection config.ModelSelection) (config.SessionInfo, error) {
+	if strings.TrimSpace(selection.Ref) == "" {
+		return config.SessionInfo{}, fmt.Errorf("模型引用不能为空")
+	}
+	return s.createSession(ctx, title, workingDir, &selection)
+}
+func (s *Service) createSession(ctx context.Context, title, workingDir string, selection *config.ModelSelection) (config.SessionInfo, error) {
 	var normDir string
 	if workingDir != "" {
 		d, err := ValidateWorkingDir(workingDir)
@@ -73,13 +82,14 @@ func (s *Service) CreateSession(ctx context.Context, title, workingDir string) (
 
 	now := time.Now().UTC()
 	info := config.SessionInfo{
-		ID:         uuid.NewString(),
-		Title:      title,
-		WorkingDir: normDir,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		ArchivedAt: nil,
-		HeadID:     "",
+		ID:             uuid.NewString(),
+		ModelSelection: selection,
+		Title:          title,
+		WorkingDir:     normDir,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		ArchivedAt:     nil,
+		HeadID:         "",
 	}
 
 	if err := s.store.CreateSession(ctx, info); err != nil {
@@ -278,5 +288,21 @@ func (s *Service) MarkRunAborted(ctx context.Context, runID, errorMessage string
 		return tx.FinishRun(ctx, runID, config.RunCompletion{
 			State: config.RunStateAborted, ErrorMessage: errorMessage,
 		}, time.Now().UTC())
+	})
+}
+
+func (s *Service) SetModelSelection(ctx context.Context, id string, selection config.ModelSelection) error {
+	if strings.TrimSpace(selection.Ref) == "" {
+		return fmt.Errorf("模型引用不能为空")
+	}
+	return s.store.WithTx(ctx, func(tx *store.Tx) error {
+		info, err := tx.GetSession(ctx, id)
+		if err != nil {
+			return err
+		}
+		if info.ArchivedAt != nil {
+			return config.ErrSessionArchived
+		}
+		return tx.UpdateModelSelection(ctx, id, selection, time.Now().UTC())
 	})
 }

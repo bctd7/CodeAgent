@@ -39,13 +39,19 @@ type SessionListOptions struct {
 // SessionInfo 是会话元数据，不是 Agent 实例或数据库连接。
 // 归档不会删除历史，切换历史分支不会回滚文件或工具副作用。
 type SessionInfo struct {
-	ID         string     `json:"id"`
-	Title      string     `json:"title"`
-	WorkingDir string     `json:"working_dir"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	ArchivedAt *time.Time `json:"archived_at,omitempty"` // nil 表示未归档。
-	HeadID     string     `json:"head_id,omitempty"`     // 当前历史位置；空会话没有 head。
+	ID             string          `json:"id"`
+	Title          string          `json:"title"`
+	WorkingDir     string          `json:"working_dir"`
+	ModelSelection *ModelSelection `json:"model_selection,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	ArchivedAt     *time.Time      `json:"archived_at,omitempty"` // nil 表示未归档。
+	HeadID         string          `json:"head_id,omitempty"`     // 当前历史位置；空会话没有 head。
+}
+
+// ModelSelection 保存配置引用，不保存凭据或传输请求头。
+type ModelSelection struct {
+	Ref string `json:"ref"`
 }
 
 // RunRecord 保存一次实际开始的用户任务，不重复保存 Entry 中的消息正文。

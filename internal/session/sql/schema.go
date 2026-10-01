@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL,
     working_dir TEXT NOT NULL,
+    model_selection_json TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     archived_at TEXT,
@@ -63,3 +64,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS entries_assistant_tool_call ON entries(assista
 
 // SetUserVersionV2SQL 设置数据库版本号为 2。
 const SetUserVersionV2SQL = `PRAGMA user_version = 2`
+
+const SetUserVersionV3SQL = `PRAGMA user_version = 3`
+const AddModelSelectionSQL = `ALTER TABLE sessions ADD COLUMN model_selection_json TEXT`

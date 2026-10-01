@@ -25,7 +25,7 @@ func initEmptyDatabase(ctx context.Context, tx *sql.Tx, version int) error {
 		return fmt.Errorf("执行创建索引语句: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, sessql.SetUserVersionV2SQL); err != nil {
+	if _, err := tx.ExecContext(ctx, sessql.SetUserVersionV3SQL); err != nil {
 		return fmt.Errorf("设置数据库版本号: %w", err)
 	}
 
@@ -179,14 +179,30 @@ func migrateDatabase(ctx context.Context, tx *sql.Tx, version int, existingTable
 		return fmt.Errorf("不支持的数据库结构: tool_executions 表主键不符")
 	}
 
-	if version == CurrentSchemaVersion {
+	if version >= 2 {
 		if _, ok := entriesCols["assistant_entry_id"]; !ok {
 			return fmt.Errorf("不支持的数据库结构: 版本为 %d 但 entries 缺少 assistant_entry_id", CurrentSchemaVersion)
 		}
 		if _, ok := entriesCols["tool_call_id"]; !ok {
 			return fmt.Errorf("不支持的数据库结构: 版本为 %d 但 entries 缺少 tool_call_id", CurrentSchemaVersion)
 		}
-		return ensureSchemaConstraints(ctx, tx)
+		if err := ensureSchemaConstraints(ctx, tx); err != nil {
+			return err
+		}
+		if version == 3 {
+			if _, ok := sessionsCols["model_selection_json"]; !ok {
+				return fmt.Errorf("版本 3 缺少模型选择列")
+			}
+			return nil
+		}
+		if _, ok := sessionsCols["model_selection_json"]; ok {
+			return fmt.Errorf("旧版本含未识别的模型选择列")
+		}
+		if _, err := tx.ExecContext(ctx, sessql.AddModelSelectionSQL); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, sessql.SetUserVersionV3SQL)
+		return err
 	}
 
 	// 执行从旧版本（version < CurrentSchemaVersion）向 v2 的升级
@@ -364,8 +380,14 @@ func migrateDatabase(ctx context.Context, tx *sql.Tx, version int, existingTable
 		return err
 	}
 
+	if _, ok := sessionsCols["model_selection_json"]; ok {
+		return fmt.Errorf("旧版本含未识别的模型选择列")
+	}
+	if _, err := tx.ExecContext(ctx, sessql.AddModelSelectionSQL); err != nil {
+		return err
+	}
 	// 更新版本号
-	if _, err := tx.ExecContext(ctx, sessql.SetUserVersionV2SQL); err != nil {
+	if _, err := tx.ExecContext(ctx, sessql.SetUserVersionV3SQL); err != nil {
 		return fmt.Errorf("更新数据库版本号失败: %w", err)
 	}
 

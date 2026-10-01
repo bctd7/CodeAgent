@@ -1,20 +1,20 @@
 package sql
 
 const SelectSessionsSQL = `
-SELECT id, title, working_dir, created_at, updated_at, archived_at, head_id FROM sessions
+SELECT id, title, working_dir, created_at, updated_at, archived_at, head_id, model_selection_json FROM sessions
 WHERE (? = 'all' OR (? = 'active' AND archived_at IS NULL) OR (? = 'archived' AND archived_at IS NOT NULL))
 AND (? = '' OR INSTR(LOWER(title), LOWER(?)) > 0)
 ORDER BY strftime('%Y-%m-%dT%H:%M:%f', updated_at) DESC, id ASC LIMIT ? OFFSET ?`
 
 // InsertSessionSQL 插入一条新的会话记录。
 const InsertSessionSQL = `
-INSERT INTO sessions (id, title, working_dir, created_at, updated_at, archived_at, head_id)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO sessions (id, title, working_dir, created_at, updated_at, archived_at, head_id, model_selection_json)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 // SelectSessionByIDSQL 按会话 ID 查询完整的会话元数据。
 const SelectSessionByIDSQL = `
-SELECT id, title, working_dir, created_at, updated_at, archived_at, head_id
+SELECT id, title, working_dir, created_at, updated_at, archived_at, head_id, model_selection_json
 FROM sessions
 WHERE id = ?
 `
@@ -60,3 +60,5 @@ UPDATE sessions
 SET head_id = ?, updated_at = ?
 WHERE id = ?
 `
+
+const UpdateModelSelectionSQL = `UPDATE sessions SET model_selection_json = ?, updated_at = ? WHERE id = ?`

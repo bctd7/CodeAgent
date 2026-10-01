@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -12,6 +13,14 @@ import (
 
 // CreateSession 在事务内创建一条新的会话元数据记录。初始 HeadID 与 ArchivedAt 强制为 NULL。
 func (tx *Tx) CreateSession(ctx context.Context, info config.SessionInfo) error {
+	var selection any
+	if info.ModelSelection != nil {
+		data, err := json.Marshal(info.ModelSelection)
+		if err != nil {
+			return err
+		}
+		selection = string(data)
+	}
 	nowStr := info.CreatedAt.UTC().Format(time.RFC3339Nano)
 	updatedStr := info.UpdatedAt.UTC().Format(time.RFC3339Nano)
 
@@ -25,6 +34,7 @@ func (tx *Tx) CreateSession(ctx context.Context, info config.SessionInfo) error 
 		updatedStr,
 		nil, // 新建会话归档状态必须为 NULL
 		nil, // 新建会话初始 HeadID 强制为 NULL，避免跨会话携带
+		selection,
 	)
 	if err != nil {
 		return fmt.Errorf("创建会话记录: %w", err)
@@ -40,6 +50,7 @@ func (tx *Tx) GetSession(ctx context.Context, id string) (config.SessionInfo, er
 		updatedAtRaw string
 		archivedAt   sql.NullString
 		headID       sql.NullString
+		selection    sql.NullString
 	)
 
 	err := tx.tx.QueryRowContext(ctx, sessql.SelectSessionByIDSQL, id).Scan(
@@ -50,6 +61,7 @@ func (tx *Tx) GetSession(ctx context.Context, id string) (config.SessionInfo, er
 		&updatedAtRaw,
 		&archivedAt,
 		&headID,
+		&selection,
 	)
 	if err != nil {
 		return config.SessionInfo{}, fmt.Errorf("获取会话: %w", err)
@@ -83,6 +95,13 @@ func (tx *Tx) GetSession(ctx context.Context, id string) (config.SessionInfo, er
 		info.HeadID = ""
 	}
 
+	if selection.Valid {
+		var v config.ModelSelection
+		if err := json.Unmarshal([]byte(selection.String), &v); err != nil {
+			return config.SessionInfo{}, fmt.Errorf("解码模型选择: %w", err)
+		}
+		info.ModelSelection = &v
+	}
 	return info, nil
 }
 
@@ -104,6 +123,7 @@ func (tx *Tx) ListSessions(ctx context.Context, opts config.SessionListOptions) 
 			updatedAtRaw string
 			archivedAt   sql.NullString
 			headID       sql.NullString
+			selection    sql.NullString
 		)
 
 		if err := rows.Scan(
@@ -114,6 +134,7 @@ func (tx *Tx) ListSessions(ctx context.Context, opts config.SessionListOptions) 
 			&updatedAtRaw,
 			&archivedAt,
 			&headID,
+			&selection,
 		); err != nil {
 			return nil, fmt.Errorf("读取会话行数据: %w", err)
 		}
@@ -146,6 +167,13 @@ func (tx *Tx) ListSessions(ctx context.Context, opts config.SessionListOptions) 
 			info.HeadID = ""
 		}
 
+		if selection.Valid {
+			var v config.ModelSelection
+			if err := json.Unmarshal([]byte(selection.String), &v); err != nil {
+				return nil, fmt.Errorf("解码模型选择: %w", err)
+			}
+			info.ModelSelection = &v
+		}
 		sessions = append(sessions, info)
 	}
 
@@ -259,4 +287,13 @@ func (s *Store) ListSessions(ctx context.Context, opts config.SessionListOptions
 		return err
 	})
 	return sessions, err
+}
+
+func (tx *Tx) UpdateModelSelection(ctx context.Context, id string, selection config.ModelSelection, now time.Time) error {
+	data, err := json.Marshal(selection)
+	if err != nil {
+		return err
+	}
+	_, err = tx.tx.ExecContext(ctx, sessql.UpdateModelSelectionSQL, string(data), now.UTC().Format(time.RFC3339Nano), id)
+	return err
 }

@@ -33,10 +33,6 @@ func (s *Session) GetCurrentHistory(ctx context.Context) ([]config.Entry, error)
 			return err
 		}
 
-		if len(entries) == 0 {
-			return fmt.Errorf("历史链中断: 未找到 ID 为 %s 的 config.Entry", sess.HeadID)
-		}
-
 		nodes := make([]config.Entry, 0, len(entries))
 		visited := make(map[string]bool, len(entries))
 		for id := sess.HeadID; id != ""; {

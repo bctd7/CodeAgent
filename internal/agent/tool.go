@@ -25,8 +25,37 @@ type Tool struct {
 	Execute      func(ctx context.Context, callID string, args map[string]any, onProgress func(llm.ContentBlock)) ([]llm.ContentBlock, error)
 }
 
+// toolCallItem 封装单个待执行的工具调用及在原始响应中的索引位置。
+type toolCallItem struct {
+	index int
+	call  llm.ContentBlock
+	tool  Tool
+}
+
+// toolGroup 封装一组工具调用（纯串行单一工具，或连续的并发安全工具批次）。
+type toolGroup struct {
+	parallel bool
+	items    []toolCallItem
+}
+
+// toolScheduler 管理单次 Step 内部的工具调度与并发控制。
+type toolScheduler struct {
+	agent            *Agent
+	run              *activeRun
+	stepIndex        int
+	tools            map[string]Tool
+	maxParallelTools int
+	calls            []llm.ContentBlock
+	responseID       CheckpointID
+
+	mu         sync.Mutex
+	stopped    bool
+	stopReason string
+	panicErr   error
+	results    []*llm.ToolResultMessage
+}
+
 // validateTools 校验工具列表的合法性：检查空名称、缺失执行函数与重复名称。
-// 给模型展示用的
 func validateTools(tools []Tool) (map[string]Tool, []llm.Tool, error) {
 	toolMap := make(map[string]Tool, len(tools))
 	llmTools := make([]llm.Tool, 0, len(tools))
@@ -52,7 +81,6 @@ func validateTools(tools []Tool) (map[string]Tool, []llm.Tool, error) {
 
 // validateToolCallBatch 检查整批工具调用的 ID 完整性与唯一性。
 // 工具调用 ID 是不透明标识，重复性检查按原始 ID 比较。
-// 工具调用的时候进行检查
 func validateToolCallBatch(calls []llm.ContentBlock) error {
 	seen := make(map[string]bool, len(calls))
 	for _, c := range calls {
@@ -65,19 +93,6 @@ func validateToolCallBatch(calls []llm.ContentBlock) error {
 		seen[c.ID] = true
 	}
 	return nil
-}
-
-// toolCallItem 封装单个待执行的工具调用及在原始响应中的索引位置。
-type toolCallItem struct {
-	index int
-	call  llm.ContentBlock
-	tool  Tool
-}
-
-// toolGroup 封装一组工具调用（纯串行单一工具，或连续的并发安全工具批次）。
-type toolGroup struct {
-	parallel bool
-	items    []toolCallItem
 }
 
 // partitionToolCalls 将模型返回的工具调用序列划分为调度组：
@@ -112,23 +127,6 @@ func partitionToolCalls(calls []llm.ContentBlock, tools map[string]Tool) []toolG
 	return groups
 }
 
-// toolScheduler 管理单次 Step 内部的工具调度与并发控制。
-type toolScheduler struct {
-	agent            *Agent
-	run              *activeRun
-	stepIndex        int
-	tools            map[string]Tool
-	maxParallelTools int
-	calls            []llm.ContentBlock
-	responseID       CheckpointID
-
-	mu         sync.Mutex
-	stopped    bool
-	stopReason string
-	panicErr   error
-	results    []*llm.ToolResultMessage
-}
-
 func newToolScheduler(a *Agent, r *activeRun, stepIndex int, calls []llm.ContentBlock, responseID CheckpointID) *toolScheduler {
 	return &toolScheduler{
 		agent:            a,
@@ -161,51 +159,6 @@ func (s *toolScheduler) execute() ([]*llm.ToolResultMessage, error) {
 	s.mu.Unlock()
 
 	return s.results, panicErr
-}
-
-// recordStop 记录调度停止原因，仅在尚未停止时记录首次原因。
-func (s *toolScheduler) recordStop(reason string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.stopped {
-		s.stopped = true
-		s.stopReason = reason
-	}
-}
-
-// recordPanic 记录工具内部 panic，保留首次发生的 panic 并停止后续调度。
-func (s *toolScheduler) recordPanic(toolName string, panicVal any) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.panicErr == nil {
-		s.panicErr = fmt.Errorf("工具 %q 执行发生内部故障 (panic): %v", toolName, panicVal)
-	}
-	s.stopped = true
-	s.stopReason = "因前序工具内部故障而未执行"
-}
-
-// checkControlStatus 检查是否应该停止启动新工具。
-// 锁外调用，不持有 Agent 锁或调度器锁调用外部代码。
-func (s *toolScheduler) checkControlStatus() (string, bool) {
-	s.mu.Lock()
-	if s.stopped {
-		reason := s.stopReason
-		s.mu.Unlock()
-		return reason, true
-	}
-	s.mu.Unlock()
-	if s.run.ctx.Err() != nil {
-		return "因取消而未执行", true
-	}
-	s.agent.mu.Lock()
-	defer s.agent.mu.Unlock()
-	if s.agent.status == AgentStatusCancelling || s.agent.status == AgentStatusClosed {
-		return "因取消而未执行", true
-	}
-	if len(s.agent.steerQueue) > 0 {
-		return "因用户纠正而未执行", true
-	}
-	return "", false
 }
 
 // executeParallelGroup 调度并行工具组：先等待并发名额，再创建执行 goroutine。
@@ -401,6 +354,51 @@ func (s *toolScheduler) saveResult(result *llm.ToolResultMessage) {
 	if decision.Kind == Stop {
 		s.recordStop("因执行故障而未执行")
 	}
+}
+
+// recordStop 记录调度停止原因，仅在尚未停止时记录首次原因。
+func (s *toolScheduler) recordStop(reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.stopped {
+		s.stopped = true
+		s.stopReason = reason
+	}
+}
+
+// recordPanic 记录工具内部 panic，保留首次发生的 panic 并停止后续调度。
+func (s *toolScheduler) recordPanic(toolName string, panicVal any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.panicErr == nil {
+		s.panicErr = fmt.Errorf("工具 %q 执行发生内部故障 (panic): %v", toolName, panicVal)
+	}
+	s.stopped = true
+	s.stopReason = "因前序工具内部故障而未执行"
+}
+
+// checkControlStatus 检查是否应该停止启动新工具。
+// 这是调度前检查；等待 Hook/落库后仍由 startPermissionLocked 原子确认启动资格。
+func (s *toolScheduler) checkControlStatus() (string, bool) {
+	s.mu.Lock()
+	if s.stopped {
+		reason := s.stopReason
+		s.mu.Unlock()
+		return reason, true
+	}
+	s.mu.Unlock()
+	if s.run.ctx.Err() != nil {
+		return "因取消而未执行", true
+	}
+	s.agent.mu.Lock()
+	defer s.agent.mu.Unlock()
+	if s.agent.status == AgentStatusCancelling || s.agent.status == AgentStatusClosed {
+		return "因取消而未执行", true
+	}
+	if len(s.agent.steerQueue) > 0 {
+		return "因用户纠正而未执行", true
+	}
+	return "", false
 }
 
 // startPermissionLocked 是工具启动预约的原子边界。调用者持有 Agent 状态锁。

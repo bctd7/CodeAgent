@@ -36,53 +36,7 @@ func (tx *Tx) CreateRun(ctx context.Context, rec config.RunRecord) error {
 
 // GetRun 在事务内查询指定会话的指定 Run 记录。
 func (tx *Tx) GetRun(ctx context.Context, id, sessionID string) (config.RunRecord, error) {
-	var (
-		rec           config.RunRecord
-		startHeadID   sql.NullString
-		lastEntryID   sql.NullString
-		startedAtRaw  string
-		finishedAtRaw sql.NullString
-	)
-
-	err := tx.tx.QueryRowContext(ctx, sessql.SelectRunByIDSQL, id, sessionID).Scan(
-		&rec.ID,
-		&rec.SessionID,
-		&startHeadID,
-		&rec.InputEntryID,
-		&lastEntryID,
-		&startedAtRaw,
-		&finishedAtRaw,
-		&rec.State,
-		&rec.Steps,
-		&rec.StopReason,
-		&rec.RawStopReason,
-		&rec.ErrorMessage,
-	)
-	if err != nil {
-		return config.RunRecord{}, fmt.Errorf("读取 Run: %w", err)
-	}
-
-	startedAt, err := time.Parse(time.RFC3339Nano, startedAtRaw)
-	if err != nil {
-		return config.RunRecord{}, fmt.Errorf("解析任务开始时间: %w", err)
-	}
-	rec.StartedAt = startedAt
-
-	if finishedAtRaw.Valid {
-		t, err := time.Parse(time.RFC3339Nano, finishedAtRaw.String)
-		if err != nil {
-			return config.RunRecord{}, fmt.Errorf("解析任务结束时间: %w", err)
-		}
-		rec.FinishedAt = &t
-	}
-	if startHeadID.Valid {
-		rec.StartHeadID = startHeadID.String
-	}
-	if lastEntryID.Valid {
-		rec.LastEntryID = lastEntryID.String
-	}
-
-	return rec, nil
+	return scanRun(tx.tx.QueryRowContext(ctx, sessql.SelectRunByIDSQL, id, sessionID))
 }
 
 // GetRunSessionID 查询任务所属会话，不决定任务能否恢复。
@@ -214,49 +168,9 @@ func (tx *Tx) ListRuns(ctx context.Context, sessionID string, limit, offset int)
 
 	var records []config.RunRecord
 	for rows.Next() {
-		var (
-			rec           config.RunRecord
-			startHeadID   sql.NullString
-			lastEntryID   sql.NullString
-			startedAtRaw  string
-			finishedAtRaw sql.NullString
-		)
-
-		if err := rows.Scan(
-			&rec.ID,
-			&rec.SessionID,
-			&startHeadID,
-			&rec.InputEntryID,
-			&lastEntryID,
-			&startedAtRaw,
-			&finishedAtRaw,
-			&rec.State,
-			&rec.Steps,
-			&rec.StopReason,
-			&rec.RawStopReason,
-			&rec.ErrorMessage,
-		); err != nil {
-			return nil, fmt.Errorf("读取 Run 行数据: %w", err)
-		}
-
-		startedAt, err := time.Parse(time.RFC3339Nano, startedAtRaw)
+		rec, err := scanRun(rows)
 		if err != nil {
-			return nil, fmt.Errorf("解析任务开始时间: %w", err)
-		}
-		rec.StartedAt = startedAt
-
-		if finishedAtRaw.Valid {
-			t, err := time.Parse(time.RFC3339Nano, finishedAtRaw.String)
-			if err != nil {
-				return nil, fmt.Errorf("解析任务结束时间: %w", err)
-			}
-			rec.FinishedAt = &t
-		}
-		if startHeadID.Valid {
-			rec.StartHeadID = startHeadID.String
-		}
-		if lastEntryID.Valid {
-			rec.LastEntryID = lastEntryID.String
+			return nil, err
 		}
 
 		records = append(records, rec)
@@ -290,50 +204,9 @@ func (tx *Tx) ListUnfinishedRuns(ctx context.Context, sessionID string) ([]confi
 
 	var records []config.RunRecord
 	for rows.Next() {
-		var (
-			rec           config.RunRecord
-			startHeadID   sql.NullString
-			lastEntryID   sql.NullString
-			startedAtRaw  string
-			finishedAtRaw sql.NullString
-		)
-
-		if err := rows.Scan(
-			&rec.ID,
-			&rec.SessionID,
-			&startHeadID,
-			&rec.InputEntryID,
-			&lastEntryID,
-			&startedAtRaw,
-			&finishedAtRaw,
-			&rec.State,
-			&rec.Steps,
-			&rec.StopReason,
-			&rec.RawStopReason,
-			&rec.ErrorMessage,
-		); err != nil {
-			return nil, fmt.Errorf("读取未结束任务行: %w", err)
-		}
-
-		if startHeadID.Valid {
-			rec.StartHeadID = startHeadID.String
-		}
-		if lastEntryID.Valid {
-			rec.LastEntryID = lastEntryID.String
-		}
-
-		startedAt, err := time.Parse(time.RFC3339Nano, startedAtRaw)
+		rec, err := scanRun(rows)
 		if err != nil {
-			return nil, fmt.Errorf("解析任务开始时间: %w", err)
-		}
-		rec.StartedAt = startedAt
-
-		if finishedAtRaw.Valid {
-			t, err := time.Parse(time.RFC3339Nano, finishedAtRaw.String)
-			if err != nil {
-				return nil, fmt.Errorf("解析任务结束时间: %w", err)
-			}
-			rec.FinishedAt = &t
+			return nil, err
 		}
 
 		records = append(records, rec)
@@ -359,4 +232,55 @@ func (s *Store) ListUnfinishedRuns(ctx context.Context, sessionID string) ([]con
 		return err
 	})
 	return records, err
+}
+
+// scanRun 统一单条与列表查询的列顺序、NULL 和时间转换。
+func scanRun(row interface{ Scan(...any) error }) (config.RunRecord, error) {
+	var (
+		rec           config.RunRecord
+		startHeadID   sql.NullString
+		lastEntryID   sql.NullString
+		startedAtRaw  string
+		finishedAtRaw sql.NullString
+	)
+
+	err := row.Scan(
+		&rec.ID,
+		&rec.SessionID,
+		&startHeadID,
+		&rec.InputEntryID,
+		&lastEntryID,
+		&startedAtRaw,
+		&finishedAtRaw,
+		&rec.State,
+		&rec.Steps,
+		&rec.StopReason,
+		&rec.RawStopReason,
+		&rec.ErrorMessage,
+	)
+	if err != nil {
+		return config.RunRecord{}, fmt.Errorf("读取 Run: %w", err)
+	}
+
+	startedAt, err := time.Parse(time.RFC3339Nano, startedAtRaw)
+	if err != nil {
+		return config.RunRecord{}, fmt.Errorf("解析任务开始时间: %w", err)
+	}
+	rec.StartedAt = startedAt
+
+	if finishedAtRaw.Valid {
+		t, err := time.Parse(time.RFC3339Nano, finishedAtRaw.String)
+		if err != nil {
+			return config.RunRecord{}, fmt.Errorf("解析任务结束时间: %w", err)
+		}
+		rec.FinishedAt = &t
+	}
+	if startHeadID.Valid {
+		rec.StartHeadID = startHeadID.String
+	}
+	if lastEntryID.Valid {
+		rec.LastEntryID = lastEntryID.String
+	}
+
+	return rec, nil
 }

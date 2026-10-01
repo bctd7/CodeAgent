@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"sync/atomic"
 
@@ -179,53 +178,4 @@ func (a *Agent) handoff(run *activeRun, checkpoint Checkpoint, scheduler *toolSc
 	default:
 	}
 	return checkpoint.ID, <-p.done
-}
-
-// StopExecution 保留首次执行故障，并取消在途工作。必要结果仍通过交接节点交付。
-func (a *Agent) StopExecution(err error) {
-	if err == nil {
-		return
-	}
-	a.mu.Lock()
-	a.stopLocked(err)
-	a.mu.Unlock()
-	go a.dispatcher.drain()
-}
-
-func (a *Agent) stopLocked(err error) {
-	if a.executionErr == nil {
-		a.executionErr = err
-	}
-	if a.currentRun != nil {
-		a.currentRun.cancel()
-	}
-	a.enqueueDroppedTasks(a.dropAllQueuedLocked(a.executionErr.Error()))
-}
-
-// WithExecutionBoundary 预约出队及请求准备边界；不持状态锁执行外部协调。
-func (a *Agent) WithExecutionBoundary(ctx context.Context, idle bool, fn func() error) error {
-	select {
-	case a.boundary <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	defer func() { <-a.boundary }()
-	a.mu.Lock()
-	closed, active, fault := a.status == AgentStatusClosed, a.currentRun != nil, a.executionErr
-	a.mu.Unlock()
-	if closed {
-		return fmt.Errorf("Agent 已关闭")
-	}
-	if fault != nil {
-		return fault
-	}
-	if idle && active {
-		return fmt.Errorf("存在活动 Run，无法执行空闲管理操作")
-	}
-	return fn()
-}
-
-// canStartWorkLocked 与控制入口共享状态锁，确认模型启动的执行边界。
-func (a *Agent) canStartWorkLocked(run *activeRun) bool {
-	return a.executionErr == nil && run.ctx.Err() == nil && a.status == AgentStatusRunning
 }

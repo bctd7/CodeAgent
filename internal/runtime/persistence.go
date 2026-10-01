@@ -169,7 +169,6 @@ func (r *Runtime) coordinate(c agent.Checkpoint, record *runRecords) agent.Decis
 	return agent.Decision{Kind: agent.Continue}
 }
 
-func (r *Runtime) firstFault() error { r.mu.Lock(); defer r.mu.Unlock(); return r.fault }
 func (r *Runtime) fillTitle(ctx context.Context, msg *llm.UserMessage) {
 	for _, b := range msg.Content {
 		if b.Type != llm.TypeText || strings.TrimSpace(b.Text) == "" {

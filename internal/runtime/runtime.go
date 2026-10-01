@@ -82,23 +82,16 @@ func (r *Runtime) SetModel(ctx context.Context, selection sessionconfig.ModelSel
 	}
 	saved := false
 	err = r.agent.WithExecutionBoundary(ctx, false, func() error {
-		select {
-		case r.control <- struct{}{}:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		defer func() { <-r.control }()
-		if err := r.admission(); err != nil {
-			return err
-		}
-		if err := r.manager.service.SetModelSelection(ctx, r.SessionID(), selection); err != nil {
-			return err
-		}
-		r.mu.Lock()
-		r.info.ModelSelection = &selection
-		r.mu.Unlock()
-		saved = true
-		return r.agent.SetModel(entry.Model, entry.Options)
+		return r.manage(ctx, false, func() error {
+			if err := r.manager.service.SetModelSelection(ctx, r.SessionID(), selection); err != nil {
+				return err
+			}
+			r.mu.Lock()
+			r.info.ModelSelection = &selection
+			r.mu.Unlock()
+			saved = true
+			return r.agent.SetModel(entry.Model, entry.Options)
+		})
 	})
 	if err != nil && saved {
 		r.persistenceFault(err)
@@ -182,6 +175,12 @@ func (r *Runtime) Snapshot() runtimeconfig.Snapshot {
 	r.mu.Unlock()
 	s.Agent = r.agent.Snapshot()
 	return s
+}
+
+func (r *Runtime) firstFault() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.fault
 }
 
 func (r *Runtime) persistenceFault(err error) {

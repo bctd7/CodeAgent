@@ -44,10 +44,8 @@ func (h *RunHandle) Wait(ctx context.Context) (RunResult, error) {
 	case <-h.done:
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		if h.result != nil {
-			return *h.result, nil
-		}
-		return RunResult{RunID: h.id, State: RunStateError, ErrorMessage: "结果未就绪"}, nil
+		// done 只由 setResult 在保存结果后关闭。
+		return *h.result, nil
 	case <-ctx.Done():
 		return RunResult{}, ctx.Err()
 	}

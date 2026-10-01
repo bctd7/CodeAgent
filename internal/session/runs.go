@@ -371,46 +371,21 @@ func (s *Session) GetRun(ctx context.Context, runID string) (config.RunDetail, e
 		var totalUsage llm.Usage
 
 		for _, ent := range entries {
-			if _, ok := ent.Message.(*llm.AssistantMessage); ok && ent.Origin == nil {
+			msg, ok := ent.Message.(*llm.AssistantMessage)
+			if !ok {
+				continue
+			}
+			if ent.Origin == nil {
 				return fmt.Errorf("assistant 记录 %s 缺少模型来源", ent.ID)
 			}
-			if ent.Origin != nil {
-				if asstMsg, ok := ent.Message.(*llm.AssistantMessage); ok {
-					u := asstMsg.Usage
-					origin := *ent.Origin
-					item, exists := usageByOriginMap[origin]
-					if !exists {
-						item = &config.ModelUsage{
-							Origin: origin,
-							Usage:  llm.Usage{},
-						}
-						usageByOriginMap[origin] = item
-					}
-					item.Usage.Input += u.Input
-					item.Usage.Output += u.Output
-					item.Usage.CacheRead += u.CacheRead
-					item.Usage.CacheWrite += u.CacheWrite
-					item.Usage.Reasoning += u.Reasoning
-					item.Usage.Total += u.Total
-					item.Usage.Cost.Input += u.Cost.Input
-					item.Usage.Cost.Output += u.Cost.Output
-					item.Usage.Cost.CacheRead += u.Cost.CacheRead
-					item.Usage.Cost.CacheWrite += u.Cost.CacheWrite
-					item.Usage.Cost.Total += u.Cost.Total
-
-					totalUsage.Input += u.Input
-					totalUsage.Output += u.Output
-					totalUsage.CacheRead += u.CacheRead
-					totalUsage.CacheWrite += u.CacheWrite
-					totalUsage.Reasoning += u.Reasoning
-					totalUsage.Total += u.Total
-					totalUsage.Cost.Input += u.Cost.Input
-					totalUsage.Cost.Output += u.Cost.Output
-					totalUsage.Cost.CacheRead += u.Cost.CacheRead
-					totalUsage.Cost.CacheWrite += u.Cost.CacheWrite
-					totalUsage.Cost.Total += u.Cost.Total
-				}
+			origin := *ent.Origin
+			item := usageByOriginMap[origin]
+			if item == nil {
+				item = &config.ModelUsage{Origin: origin}
+				usageByOriginMap[origin] = item
 			}
+			addUsage(&item.Usage, msg.Usage)
+			addUsage(&totalUsage, msg.Usage)
 		}
 
 		var usageByOrigin []config.ModelUsage
@@ -431,12 +406,6 @@ func (s *Session) GetRun(ctx context.Context, runID string) (config.RunDetail, e
 			return a.BaseURL < b.BaseURL
 		})
 
-		if entries == nil {
-			entries = []config.Entry{}
-		}
-		if toolExecs == nil {
-			toolExecs = []config.ToolExecution{}
-		}
 		if usageByOrigin == nil {
 			usageByOrigin = []config.ModelUsage{}
 		}
@@ -526,4 +495,19 @@ func (s *Session) SwitchBranch(ctx context.Context, runID string) error {
 		now := time.Now().UTC()
 		return tx.UpdateSessionHead(ctx, s.sessionID, lastEntryID, now)
 	})
+}
+
+// addUsage 汇总保存时的用量和费用，不重新计费。
+func addUsage(dst *llm.Usage, u llm.Usage) {
+	dst.Input += u.Input
+	dst.Output += u.Output
+	dst.Reasoning += u.Reasoning
+	dst.CacheRead += u.CacheRead
+	dst.CacheWrite += u.CacheWrite
+	dst.Total += u.Total
+	dst.Cost.Input += u.Cost.Input
+	dst.Cost.Output += u.Cost.Output
+	dst.Cost.CacheRead += u.Cost.CacheRead
+	dst.Cost.CacheWrite += u.Cost.CacheWrite
+	dst.Cost.Total += u.Cost.Total
 }

@@ -44,65 +44,7 @@ func (tx *Tx) CreateSession(ctx context.Context, info config.SessionInfo) error 
 
 // GetSession 在事务内根据会话 ID 读取单条会话元数据。
 func (tx *Tx) GetSession(ctx context.Context, id string) (config.SessionInfo, error) {
-	var (
-		info         config.SessionInfo
-		createdAtRaw string
-		updatedAtRaw string
-		archivedAt   sql.NullString
-		headID       sql.NullString
-		selection    sql.NullString
-	)
-
-	err := tx.tx.QueryRowContext(ctx, sessql.SelectSessionByIDSQL, id).Scan(
-		&info.ID,
-		&info.Title,
-		&info.WorkingDir,
-		&createdAtRaw,
-		&updatedAtRaw,
-		&archivedAt,
-		&headID,
-		&selection,
-	)
-	if err != nil {
-		return config.SessionInfo{}, fmt.Errorf("获取会话: %w", err)
-	}
-
-	createdAt, err := time.Parse(time.RFC3339Nano, createdAtRaw)
-	if err != nil {
-		return config.SessionInfo{}, fmt.Errorf("解析会话创建时间: %w", err)
-	}
-	info.CreatedAt = createdAt
-
-	updatedAt, err := time.Parse(time.RFC3339Nano, updatedAtRaw)
-	if err != nil {
-		return config.SessionInfo{}, fmt.Errorf("解析会话更新时间: %w", err)
-	}
-	info.UpdatedAt = updatedAt
-
-	if archivedAt.Valid {
-		t, err := time.Parse(time.RFC3339Nano, archivedAt.String)
-		if err != nil {
-			return config.SessionInfo{}, fmt.Errorf("解析会话归档时间: %w", err)
-		}
-		info.ArchivedAt = &t
-	} else {
-		info.ArchivedAt = nil
-	}
-
-	if headID.Valid {
-		info.HeadID = headID.String
-	} else {
-		info.HeadID = ""
-	}
-
-	if selection.Valid {
-		var v config.ModelSelection
-		if err := json.Unmarshal([]byte(selection.String), &v); err != nil {
-			return config.SessionInfo{}, fmt.Errorf("解码模型选择: %w", err)
-		}
-		info.ModelSelection = &v
-	}
-	return info, nil
+	return scanSession(tx.tx.QueryRowContext(ctx, sessql.SelectSessionByIDSQL, id))
 }
 
 // ListSessions 在事务内按照筛选、搜索、排序与分页要求列出会话。
@@ -117,62 +59,9 @@ func (tx *Tx) ListSessions(ctx context.Context, opts config.SessionListOptions) 
 
 	var sessions []config.SessionInfo
 	for rows.Next() {
-		var (
-			info         config.SessionInfo
-			createdAtRaw string
-			updatedAtRaw string
-			archivedAt   sql.NullString
-			headID       sql.NullString
-			selection    sql.NullString
-		)
-
-		if err := rows.Scan(
-			&info.ID,
-			&info.Title,
-			&info.WorkingDir,
-			&createdAtRaw,
-			&updatedAtRaw,
-			&archivedAt,
-			&headID,
-			&selection,
-		); err != nil {
-			return nil, fmt.Errorf("读取会话行数据: %w", err)
-		}
-
-		createdAt, err := time.Parse(time.RFC3339Nano, createdAtRaw)
+		info, err := scanSession(rows)
 		if err != nil {
-			return nil, fmt.Errorf("解析会话创建时间: %w", err)
-		}
-		info.CreatedAt = createdAt
-
-		updatedAt, err := time.Parse(time.RFC3339Nano, updatedAtRaw)
-		if err != nil {
-			return nil, fmt.Errorf("解析会话更新时间: %w", err)
-		}
-		info.UpdatedAt = updatedAt
-
-		if archivedAt.Valid {
-			t, err := time.Parse(time.RFC3339Nano, archivedAt.String)
-			if err != nil {
-				return nil, fmt.Errorf("解析会话归档时间: %w", err)
-			}
-			info.ArchivedAt = &t
-		} else {
-			info.ArchivedAt = nil
-		}
-
-		if headID.Valid {
-			info.HeadID = headID.String
-		} else {
-			info.HeadID = ""
-		}
-
-		if selection.Valid {
-			var v config.ModelSelection
-			if err := json.Unmarshal([]byte(selection.String), &v); err != nil {
-				return nil, fmt.Errorf("解码模型选择: %w", err)
-			}
-			info.ModelSelection = &v
+			return nil, err
 		}
 		sessions = append(sessions, info)
 	}
@@ -296,4 +185,63 @@ func (tx *Tx) UpdateModelSelection(ctx context.Context, id string, selection con
 	}
 	_, err = tx.tx.ExecContext(ctx, sessql.UpdateModelSelectionSQL, string(data), now.UTC().Format(time.RFC3339Nano), id)
 	return err
+}
+
+// scanSession 统一单条与列表查询的元数据转换。
+func scanSession(row interface{ Scan(...any) error }) (config.SessionInfo, error) {
+	var (
+		info         config.SessionInfo
+		createdAtRaw string
+		updatedAtRaw string
+		archivedAt   sql.NullString
+		headID       sql.NullString
+		selection    sql.NullString
+	)
+
+	err := row.Scan(
+		&info.ID,
+		&info.Title,
+		&info.WorkingDir,
+		&createdAtRaw,
+		&updatedAtRaw,
+		&archivedAt,
+		&headID,
+		&selection,
+	)
+	if err != nil {
+		return config.SessionInfo{}, fmt.Errorf("获取会话: %w", err)
+	}
+
+	createdAt, err := time.Parse(time.RFC3339Nano, createdAtRaw)
+	if err != nil {
+		return config.SessionInfo{}, fmt.Errorf("解析会话创建时间: %w", err)
+	}
+	info.CreatedAt = createdAt
+
+	updatedAt, err := time.Parse(time.RFC3339Nano, updatedAtRaw)
+	if err != nil {
+		return config.SessionInfo{}, fmt.Errorf("解析会话更新时间: %w", err)
+	}
+	info.UpdatedAt = updatedAt
+
+	if archivedAt.Valid {
+		t, err := time.Parse(time.RFC3339Nano, archivedAt.String)
+		if err != nil {
+			return config.SessionInfo{}, fmt.Errorf("解析会话归档时间: %w", err)
+		}
+		info.ArchivedAt = &t
+	}
+
+	if headID.Valid {
+		info.HeadID = headID.String
+	}
+
+	if selection.Valid {
+		var v config.ModelSelection
+		if err := json.Unmarshal([]byte(selection.String), &v); err != nil {
+			return config.SessionInfo{}, fmt.Errorf("解码模型选择: %w", err)
+		}
+		info.ModelSelection = &v
+	}
+	return info, nil
 }

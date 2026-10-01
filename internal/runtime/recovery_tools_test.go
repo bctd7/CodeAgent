@@ -114,7 +114,7 @@ func TestToolsStableBeforeAndAfterBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := waitRun(t, h)
+	result := waitResult(t, h)
 	if result.State != agent.RunStateSuccess {
 		t.Fatal(result.ErrorMessage)
 	}
@@ -143,7 +143,7 @@ func TestToolsStableBeforeAndAfterBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result = waitRun(t, h)
+	result = waitResult(t, h)
 	if result.State != agent.RunStateSuccess {
 		t.Fatal(result.ErrorMessage)
 	}
@@ -190,13 +190,13 @@ func TestUserCancelPreservesQueueAndConsumedSteer(t *testing.T) {
 	}, []agent.Tool{})
 	r := openTestSession(t, m)
 	h1, _ := r.Submit(context.Background(), user("cancel me"))
-	waitSignal(t, started)
+	await(t, started)
 	if err := r.Steer("unconsumed"); err != nil {
 		t.Fatal(err)
 	}
 	h2, _ := r.Submit(context.Background(), user("next"))
 	h1.Cancel()
-	if waitRun(t, h1).State != agent.RunStateAborted || waitRun(t, h2).State != agent.RunStateSuccess {
+	if waitResult(t, h1).State != agent.RunStateAborted || waitResult(t, h2).State != agent.RunStateSuccess {
 		t.Fatal("single cancel dropped next run")
 	}
 	detail, err := r.GetRun(context.Background(), h1.ID())
@@ -231,12 +231,12 @@ func TestSteerSkipsUnstartedToolsAndPersistsInput(t *testing.T) {
 	}, []agent.Tool{tool})
 	r := openTestSession(t, m)
 	h, _ := r.Submit(context.Background(), user("steer"))
-	waitSignal(t, started)
+	await(t, started)
 	if err := r.Steer("change direction"); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
-	if waitRun(t, h).State != agent.RunStateSuccess {
+	if waitResult(t, h).State != agent.RunStateSuccess {
 		t.Fatal("steered run failed")
 	}
 	detail, err := r.GetRun(context.Background(), h.ID())
@@ -276,10 +276,10 @@ func TestDifferentSessionsExecuteConcurrently(t *testing.T) {
 	r1, r2 := openTestSession(t, m), openTestSession(t, m)
 	h1, _ := r1.Submit(context.Background(), user("one"))
 	h2, _ := r2.Submit(context.Background(), user("two"))
-	waitSignal(t, started)
-	waitSignal(t, started)
+	await(t, started)
+	await(t, started)
 	close(release)
-	if waitRun(t, h1).State != agent.RunStateSuccess || waitRun(t, h2).State != agent.RunStateSuccess {
+	if waitResult(t, h1).State != agent.RunStateSuccess || waitResult(t, h2).State != agent.RunStateSuccess {
 		t.Fatal("different sessions failed")
 	}
 }
@@ -348,7 +348,7 @@ func TestModelEventCanCallRuntimeControls(t *testing.T) {
 	if err := r.SetModel(context.Background(), sessionconfig.ModelSelection{Ref: "local/b"}); err != nil {
 		t.Fatal(err)
 	}
-	waitSignal(t, callbackDone)
+	await(t, callbackDone)
 	if r.Snapshot().Agent.CurrentModel.ID != "a" || r.Snapshot().Model.Ref != "local/a" {
 		t.Fatal("callback reentry diverged")
 	}

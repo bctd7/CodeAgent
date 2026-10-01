@@ -87,7 +87,11 @@ func (r *Registry) BeforeTool(ctx context.Context, request ToolRequest) ToolDeci
 	r.mu.Unlock()
 	for _, handler := range handlers {
 		var decision ToolDecision
-		err := protected(func() error { var err error; decision, err = handler(ctx, request); return err })
+		err := protected(func() error {
+			var err error
+			decision, err = handler(ctx, request)
+			return err
+		})
 		if err == nil {
 			err = ctx.Err()
 		}

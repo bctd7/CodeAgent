@@ -37,32 +37,11 @@ func (s *Session) RecordToolStart(ctx context.Context, assistantEntryID, toolCal
 			return fmt.Errorf("会话 %s 已归档，拒绝记录工具启动: %w", s.sessionID, config.ErrSessionArchived)
 		}
 
-		assistant, err := tx.GetEntry(ctx, assistantEntryID, s.sessionID)
+		assistant, err := s.loadToolCall(ctx, tx, assistantEntryID, toolCallID)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("未找到对应的 assistant 记录: %w", sql.ErrNoRows)
-			}
-			return fmt.Errorf("查询 assistant 记录: %w", err)
+			return err
 		}
-
 		runID := assistant.RunID
-		asstMsg, ok := assistant.Message.(*llm.AssistantMessage)
-		if !ok {
-			return fmt.Errorf("指定的记录 %s 不是 assistant 消息", assistantEntryID)
-		}
-
-		foundCount := 0
-		for _, b := range asstMsg.Content {
-			if b.Type == llm.TypeToolCall && b.ID == toolCallID {
-				foundCount++
-			}
-		}
-		if foundCount == 0 {
-			return fmt.Errorf("assistant 消息中未找到 ToolCallID %q: %w", toolCallID, config.ErrToolCallNotFound)
-		}
-		if foundCount > 1 {
-			return fmt.Errorf("assistant 消息中存在重复的 ToolCallID %q", toolCallID)
-		}
 
 		_, finishedAt, err := tx.GetRunStepsAndFinishedAt(ctx, runID, s.sessionID)
 		if err != nil {
@@ -144,32 +123,11 @@ func (s *Session) AppendToolResult(ctx context.Context, assistantEntryID string,
 			return fmt.Errorf("会话 %s 已归档，拒绝追加工具结果: %w", s.sessionID, config.ErrSessionArchived)
 		}
 
-		assistant, err := tx.GetEntry(ctx, assistantEntryID, s.sessionID)
+		assistant, err := s.loadToolCall(ctx, tx, assistantEntryID, resultMsg.ToolCallID)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("未找到对应的 assistant 记录: %w", sql.ErrNoRows)
-			}
-			return fmt.Errorf("查询 assistant 记录: %w", err)
+			return err
 		}
-
 		runID := assistant.RunID
-		asstMsg, ok := assistant.Message.(*llm.AssistantMessage)
-		if !ok {
-			return fmt.Errorf("指定的记录 %s 不是 assistant 消息", assistantEntryID)
-		}
-
-		foundCount := 0
-		for _, b := range asstMsg.Content {
-			if b.Type == llm.TypeToolCall && b.ID == resultMsg.ToolCallID {
-				foundCount++
-			}
-		}
-		if foundCount == 0 {
-			return fmt.Errorf("assistant 消息中未找到 ToolCallID %q: %w", resultMsg.ToolCallID, config.ErrToolCallNotFound)
-		}
-		if foundCount > 1 {
-			return fmt.Errorf("assistant 消息中存在重复的 ToolCallID %q", resultMsg.ToolCallID)
-		}
 
 		_, finishedAt, err := tx.GetRunStepsAndFinishedAt(ctx, runID, s.sessionID)
 		if err != nil {
@@ -257,4 +215,35 @@ func (s *Session) AppendToolResult(ctx context.Context, assistantEntryID string,
 	}
 
 	return entry, nil
+}
+
+// loadToolCall 在当前事务内验证 assistant 归属及调用 ID 的唯一性。
+func (s *Session) loadToolCall(ctx context.Context, tx *store.Tx, assistantEntryID, toolCallID string) (config.Entry, error) {
+	assistant, err := tx.GetEntry(ctx, assistantEntryID, s.sessionID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return config.Entry{}, fmt.Errorf("未找到对应的 assistant 记录: %w", sql.ErrNoRows)
+		}
+		return config.Entry{}, fmt.Errorf("查询 assistant 记录: %w", err)
+	}
+
+	asstMsg, ok := assistant.Message.(*llm.AssistantMessage)
+	if !ok {
+		return config.Entry{}, fmt.Errorf("指定的记录 %s 不是 assistant 消息", assistantEntryID)
+	}
+
+	foundCount := 0
+	for _, b := range asstMsg.Content {
+		if b.Type == llm.TypeToolCall && b.ID == toolCallID {
+			foundCount++
+		}
+	}
+	if foundCount == 0 {
+		return config.Entry{}, fmt.Errorf("assistant 消息中未找到 ToolCallID %q: %w", toolCallID, config.ErrToolCallNotFound)
+	}
+	if foundCount > 1 {
+		return config.Entry{}, fmt.Errorf("assistant 消息中存在重复的 ToolCallID %q", toolCallID)
+	}
+
+	return assistant, nil
 }

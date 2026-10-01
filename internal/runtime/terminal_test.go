@@ -55,8 +55,8 @@ func TestTerminalResponsesAndToolPanic(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result := waitRun(t, h)
-			waitSignal(t, ended)
+			result := waitResult(t, h)
+			await(t, ended)
 			if mode == "length" {
 				if result.State != agent.RunStateSuccess || result.StopReason != agent.RunStopTruncated {
 					t.Fatal(result)

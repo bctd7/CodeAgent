@@ -66,26 +66,6 @@ func openTestSession(t *testing.T, m *Manager) *Runtime {
 	return r
 }
 
-func waitRun(t *testing.T, handle *RunHandle) agent.RunResult {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	result, err := handle.Wait(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return result
-}
-
-func waitSignal(t *testing.T, ch <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for controlled execution")
-	}
-}
-
 func trigger(t *testing.T, m *Manager, statement string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", m.database)
@@ -196,7 +176,7 @@ func TestQueuePersistsOnlyStartedRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitSignal(t, started)
+	await(t, started)
 	h2, err := r.Submit(context.Background(), user("queued"))
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +185,7 @@ func TestQueuePersistsOnlyStartedRuns(t *testing.T) {
 		t.Fatalf("queued run persisted: %v", err)
 	}
 	h2.Cancel()
-	if waitRun(t, h2).State != agent.RunStateAborted {
+	if waitResult(t, h2).State != agent.RunStateAborted {
 		t.Fatal("queue cancel failed")
 	}
 	short, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -220,7 +200,7 @@ func TestQueuePersistsOnlyStartedRuns(t *testing.T) {
 		t.Fatal("archived active run")
 	}
 	close(release)
-	if waitRun(t, h1).State != agent.RunStateSuccess {
+	if waitResult(t, h1).State != agent.RunStateSuccess {
 		t.Fatal("first failed")
 	}
 	detail, err := r.GetRun(context.Background(), h1.ID())
@@ -260,7 +240,7 @@ func TestRepeatedCallIDsAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result := waitRun(t, h); result.State != agent.RunStateSuccess {
+	if result := waitResult(t, h); result.State != agent.RunStateSuccess {
 		t.Fatal(result)
 	}
 	detail, err := r.GetRun(context.Background(), h.ID())
@@ -300,7 +280,7 @@ func TestCancelAndCloseTimeoutRetainOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitSignal(t, started)
+	await(t, started)
 	h2, err := r.Submit(context.Background(), user("queued"))
 	if err != nil {
 		t.Fatal(err)
@@ -316,11 +296,11 @@ func TestCancelAndCloseTimeoutRetainOwnership(t *testing.T) {
 	if _, err := acquireOwnership(context.Background(), m.database, r.SessionID()); !errors.Is(err, runtimeconfig.ErrSessionOwned) {
 		t.Fatalf("released before tools exited: %v", err)
 	}
-	if waitRun(t, h2).State != agent.RunStateAborted {
+	if waitResult(t, h2).State != agent.RunStateAborted {
 		t.Fatal("queue close did not complete")
 	}
 	close(release)
-	result := waitRun(t, h)
+	result := waitResult(t, h)
 	if result.State != agent.RunStateAborted {
 		t.Fatalf("close cancellation: %+v", result)
 	}
@@ -392,17 +372,17 @@ func TestManagerCloseAttemptsAllInstances(t *testing.T) {
 	r1, r2 := openTestSession(t, m), openTestSession(t, m)
 	h1, _ := r1.Submit(context.Background(), user("one"))
 	h2, _ := r2.Submit(context.Background(), user("two"))
-	waitSignal(t, started)
-	waitSignal(t, started)
+	await(t, started)
+	await(t, started)
 	firstClosed := make(chan error, 1)
 	go func() { firstClosed <- m.CloseSession(context.Background(), r1.SessionID()) }()
-	waitSignal(t, cancelled)
+	await(t, cancelled)
 	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	if err := m.Close(short); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
-	waitSignal(t, cancelled)
+	await(t, cancelled)
 	if _, err := r2.Submit(context.Background(), user("late")); !errors.Is(err, runtimeconfig.ErrClosing) {
 		t.Fatal("manager shutdown accepted input", err)
 	}
@@ -410,8 +390,8 @@ func TestManagerCloseAttemptsAllInstances(t *testing.T) {
 		t.Fatal("database closed before tool drain", err)
 	}
 	close(release)
-	waitRun(t, h1)
-	waitRun(t, h2)
+	waitResult(t, h1)
+	waitResult(t, h2)
 	if err := <-firstClosed; err != nil {
 		t.Fatal(err)
 	}
@@ -435,18 +415,18 @@ func TestFinishFailureDiscardsQueueWithoutStartingIt(t *testing.T) {
 	r := openTestSession(t, m)
 	trigger(t, m, `CREATE TRIGGER fail_finish BEFORE UPDATE OF finished_at ON runs BEGIN SELECT RAISE(ABORT,'cannot finish'); END`)
 	h1, _ := r.Submit(context.Background(), user("first"))
-	waitSignal(t, started)
+	await(t, started)
 	h2, _ := r.Submit(context.Background(), user("second"))
 	h3, err := r.Submit(context.Background(), user("third"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	close(release)
-	if waitRun(t, h1).State != agent.RunStateError {
+	if waitResult(t, h1).State != agent.RunStateError {
 		t.Fatal("failed finish was accepted")
 	}
 	for _, h := range []*RunHandle{h2, h3} {
-		result := waitRun(t, h)
+		result := waitResult(t, h)
 		if result.State != agent.RunStateAborted || result.ErrorMessage == "" {
 			t.Fatal("failure queue did not terminate clearly", result)
 		}

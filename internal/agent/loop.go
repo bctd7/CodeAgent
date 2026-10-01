@@ -74,7 +74,7 @@ func (a *Agent) executeRun(run *activeRun) {
 	// 工具结果加入历史后继续当前 Run；收尾时返回外层，由 runLoop 取下一个任务。
 	for {
 		a.boundary <- struct{}{}
-		// 1. 检查取消与关闭
+		// 检查取消与关闭
 		a.mu.Lock()
 		if a.status == AgentStatusClosed || a.status == AgentStatusCancelling || run.ctx.Err() != nil {
 			<-a.boundary
@@ -82,7 +82,7 @@ func (a *Agent) executeRun(run *activeRun) {
 			return
 		}
 
-		// 2. 检查并应用待生效模型切换
+		// 检查并应用待生效模型切换
 		if a.pendingModel != nil {
 			a.changeModel()
 			a.mu.Unlock()
@@ -150,7 +150,7 @@ func (a *Agent) executeRun(run *activeRun) {
 			Timestamp: time.Now(),
 		})
 
-		// 4. 调用底层模型建流并转发事件
+		// 调用底层模型建流并转发事件
 		streamResult, err := a.callStreamAndForward(run.ctx, run.id, stepIndex, req)
 		if err != nil {
 			stepEnd := Event{
@@ -171,7 +171,7 @@ func (a *Agent) executeRun(run *activeRun) {
 
 		assistantMsg := streamResult.Message
 
-		// 5. 集中记录模型最终消息、同源来源与用量
+		// 集中记录模型最终消息、同源来源与用量
 		origin := ModelOrigin{Provider: currentModel.Provider, API: currentModel.API, ModelID: currentModel.ID, BaseURL: currentModel.BaseURL}
 		responseID, decision := a.handoff(run, Checkpoint{Kind: ModelResponseReady, StepIndex: stepIndex, Response: &assistantMsg, Origin: &origin}, nil)
 		a.recordResponseAndUsage(run, currentModel, &assistantMsg)
@@ -206,7 +206,7 @@ func (a *Agent) executeRun(run *activeRun) {
 		}
 		a.mu.Unlock()
 
-		// 11. 调度执行工具
+		// 调度执行工具
 		scheduler := newToolScheduler(a, run, stepIndex, toolCalls, responseID)
 		results, panicErr := scheduler.execute()
 
@@ -420,27 +420,27 @@ func accumulateUsage(run *activeRun, sourceKey string, u llm.Usage) {
 	}
 
 	entry := run.usage[sourceKey]
-	entry.Input += u.Input
-	entry.Output += u.Output
-	entry.Reasoning += u.Reasoning
-	entry.CacheRead += u.CacheRead
-	entry.CacheWrite += u.CacheWrite
-	entry.Total += u.Total
-	entry.Cost.Input += u.Cost.Input
-	entry.Cost.Output += u.Cost.Output
-	entry.Cost.CacheRead += u.Cost.CacheRead
-	entry.Cost.CacheWrite += u.Cost.CacheWrite
-	entry.Cost.Total += u.Cost.Total
+	addUsage(&entry, u)
 	run.usage[sourceKey] = entry
-	run.totalUsage.Input += u.Input
-	run.totalUsage.Output += u.Output
-	run.totalUsage.Reasoning += u.Reasoning
-	run.totalUsage.CacheRead += u.CacheRead
-	run.totalUsage.CacheWrite += u.CacheWrite
-	run.totalUsage.Total += u.Total
-	run.totalUsage.Cost.Input += u.Cost.Input
-	run.totalUsage.Cost.Output += u.Cost.Output
-	run.totalUsage.Cost.CacheRead += u.Cost.CacheRead
-	run.totalUsage.Cost.CacheWrite += u.Cost.CacheWrite
-	run.totalUsage.Cost.Total += u.Cost.Total
+	addUsage(&run.totalUsage, u)
+}
+
+// canStartWorkLocked 与控制入口共享状态锁，确认模型启动的执行边界。
+func (a *Agent) canStartWorkLocked(run *activeRun) bool {
+	return a.executionErr == nil && run.ctx.Err() == nil && a.status == AgentStatusRunning
+}
+
+// addUsage 累加已报告的统计，不根据 Reasoning 重算 Output 或 Total。
+func addUsage(dst *llm.Usage, u llm.Usage) {
+	dst.Input += u.Input
+	dst.Output += u.Output
+	dst.Reasoning += u.Reasoning
+	dst.CacheRead += u.CacheRead
+	dst.CacheWrite += u.CacheWrite
+	dst.Total += u.Total
+	dst.Cost.Input += u.Cost.Input
+	dst.Cost.Output += u.Cost.Output
+	dst.Cost.CacheRead += u.Cost.CacheRead
+	dst.Cost.CacheWrite += u.Cost.CacheWrite
+	dst.Cost.Total += u.Cost.Total
 }

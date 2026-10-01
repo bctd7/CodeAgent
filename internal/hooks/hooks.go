@@ -68,6 +68,9 @@ func (r *Registry) Completed(ctx context.Context, event Completion) {
 	r.mu.Unlock()
 	for _, handler := range handlers {
 		err := protected(func() error { return handler(ctx, event) })
+		if err == nil {
+			err = ctx.Err()
+		}
 		if err != nil {
 			r.report(Failure{"completion", event.SessionID, event.Result.RunID, err})
 		}
@@ -85,6 +88,9 @@ func (r *Registry) BeforeTool(ctx context.Context, request ToolRequest) ToolDeci
 	for _, handler := range handlers {
 		var decision ToolDecision
 		err := protected(func() error { var err error; decision, err = handler(ctx, request); return err })
+		if err == nil {
+			err = ctx.Err()
+		}
 		if err != nil {
 			r.report(Failure{"before_tool", request.SessionID, request.RunID, err})
 			return ToolDecision{Reason: fmt.Sprintf("工具 Hook 拒绝: %v", err)}

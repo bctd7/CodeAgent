@@ -239,7 +239,7 @@ func runOnlineStreamChatBatch(entryOpenAI, entryAnthropic *config.ModelEntry, ba
 
 	for idx, t := range tests {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:   t.entry.Model,
 			Options: t.entry.Options,
 			Stream:  agent.StreamFunc(globalOnlineBudget.wrapStream(baseStream, nil)),
@@ -313,7 +313,7 @@ func runOnlineSingleToolBatch(entryOpenAI, entryAnthropic *config.ModelEntry, ba
 
 	for _, t := range tests {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:   t.entry.Model,
 			Options: t.entry.Options,
 			Stream:  agent.StreamFunc(globalOnlineBudget.wrapStream(baseStream, nil)),
@@ -375,7 +375,7 @@ func runOnlineMultiTool(entry *config.ModelEntry, baseStream StreamFunc, verbose
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	ag, err := agent.New(agent.Config{
+	ag, err := newDemoAgent(agent.Config{
 		Model:   entry.Model,
 		Options: entry.Options,
 		Stream:  agent.StreamFunc(globalOnlineBudget.wrapStream(baseStream, nil)),
@@ -487,7 +487,7 @@ func runOnlineSteerScenario(entry *config.ModelEntry, baseStream StreamFunc, ver
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	ag, err := agent.New(agent.Config{
+	ag, err := newDemoAgent(agent.Config{
 		Model:   entry.Model,
 		Options: entry.Options,
 		Stream:  agent.StreamFunc(trackStream),
@@ -600,7 +600,7 @@ func runOnlineCancelBatch(entryOpenAI, entryAnthropic *config.ModelEntry, baseSt
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:   t.entry.Model,
 			Options: t.entry.Options,
 			Stream:  agent.StreamFunc(globalOnlineBudget.wrapStream(baseStream, nil)),
@@ -698,7 +698,7 @@ func runOnlineQueueScenario(entry *config.ModelEntry, baseStream StreamFunc, ver
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	ag, err := agent.New(agent.Config{
+	ag, err := newDemoAgent(agent.Config{
 		Model:   entry.Model,
 		Options: entry.Options,
 		Stream:  agent.StreamFunc(globalOnlineBudget.wrapStream(baseStream, nil)),
@@ -815,7 +815,7 @@ func runOnlineModelSwitchScenario(entryOpenAI, entryAnthropic *config.ModelEntry
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	agA, errA := agent.New(agent.Config{
+	agA, errA := newDemoAgent(agent.Config{
 		Model:   entryOpenAI.Model,
 		Options: entryOpenAI.Options,
 		Stream:  agent.StreamFunc(trackStreamA),
@@ -830,7 +830,12 @@ func runOnlineModelSwitchScenario(entryOpenAI, entryAnthropic *config.ModelEntry
 	defer agA.Close()
 
 	promptA := "请使用 add 工具计算 12 加 34。"
-	hA, _ := agA.Submit(ctx, userMsg(promptA))
+	hA, errSubmitA := agA.Submit(ctx, userMsg(promptA))
+	if errSubmitA != nil {
+		res.Actual = fmt.Sprintf("Part A 提交失败: %v", errSubmitA)
+		res.Duration = time.Since(start)
+		return res
+	}
 
 	// 等待第 1 步真实生成流启动
 	select {
@@ -897,7 +902,7 @@ func runOnlineModelSwitchScenario(entryOpenAI, entryAnthropic *config.ModelEntry
 		reqMu.Unlock()
 	})
 
-	agB, errB := agent.New(agent.Config{
+	agB, errB := newDemoAgent(agent.Config{
 		Model:   entryAnthropic.Model,
 		Options: entryAnthropic.Options,
 		Stream:  agent.StreamFunc(trackStreamB),
@@ -910,7 +915,12 @@ func runOnlineModelSwitchScenario(entryOpenAI, entryAnthropic *config.ModelEntry
 	}
 	defer agB.Close()
 
-	hB, _ := agB.Submit(ctx, userMsg("请调用 add 工具计算 44 加 44。"))
+	hB, errSubmitB := agB.Submit(ctx, userMsg("请调用 add 工具计算 44 加 44。"))
+	if errSubmitB != nil {
+		res.Actual = fmt.Sprintf("Part B 提交失败: %v", errSubmitB)
+		res.Duration = time.Since(start)
+		return res
+	}
 	select {
 	case <-toolStartedB:
 		// 在工具执行期间切换至 OpenAI 协议
@@ -1080,7 +1090,7 @@ func runSupplementalSingleTool(entry *config.ModelEntry, baseStream StreamFunc, 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	ag, err := agent.New(agent.Config{
+	ag, err := newDemoAgent(agent.Config{
 		Model:   entry.Model,
 		Options: entry.Options,
 		Stream:  agent.StreamFunc(trackedStream),
@@ -1274,7 +1284,7 @@ func runSupplementalMultiTool(entry *config.ModelEntry, baseStream StreamFunc, v
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	ag, err := agent.New(agent.Config{
+	ag, err := newDemoAgent(agent.Config{
 		Model:   entry.Model,
 		Options: entry.Options,
 		Stream:  agent.StreamFunc(trackedStream),
@@ -1528,7 +1538,7 @@ func runSupplementalCancel(entry *config.ModelEntry, baseStream StreamFunc, verb
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	ag, err := agent.New(agent.Config{
+	ag, err := newDemoAgent(agent.Config{
 		Model:   entry.Model,
 		Options: entry.Options,
 		Stream:  agent.StreamFunc(trackedStream),

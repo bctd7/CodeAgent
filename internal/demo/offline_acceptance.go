@@ -203,7 +203,7 @@ func runOfflineScenario1() ScenarioResult {
 		mu.Unlock()
 	}
 
-	ag, err := agent.New(agent.Config{
+	ag, err := newDemoAgent(agent.Config{
 		Model:   llm.Model{ID: "mock-model", API: llm.APIKindOpenAI},
 		Stream:  stream,
 		Tools:   []agent.Tool{agent.NewAddTool()},
@@ -250,7 +250,7 @@ func runOfflineScenario1() ScenarioResult {
 		return createSingleTextStream(ctx, "已识别未知工具与参数错误并完成降级回答")
 	}
 
-	ag2, err := agent.New(agent.Config{
+	ag2, err := newDemoAgent(agent.Config{
 		Model:  llm.Model{ID: "mock-model", API: llm.APIKindOpenAI},
 		Stream: stream2,
 		Tools:  []agent.Tool{agent.NewAddTool()},
@@ -386,7 +386,7 @@ func runOfflineScenario2() ScenarioResult {
 			return createSingleTextStream(ctx, "default ok")
 		}
 
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:  llm.Model{ID: "mock-model", API: llm.APIKindOpenAI},
 			Stream: stream,
 		})
@@ -602,7 +602,7 @@ func runOfflineScenario3() ScenarioResult {
 			return createSingleTextStream(ctx, "fallback ok")
 		}
 
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:  llm.Model{ID: "mock-model", API: llm.APIKindOpenAI},
 			Stream: stream,
 		})
@@ -819,7 +819,7 @@ func runOfflineScenario4() ScenarioResult {
 			return createSingleTextStream(ctx, "all tools done")
 		}
 
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:            llm.Model{ID: "mock-model", API: llm.APIKindOpenAI},
 			Stream:           stream,
 			Tools:            tools,
@@ -962,7 +962,7 @@ func runOfflineScenario5() ScenarioResult {
 			}
 		}
 
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:   llm.Model{ID: "mock-model", API: llm.APIKindOpenAI},
 			Stream:  stream,
 			Tools:   []agent.Tool{tool1, tool2},
@@ -1121,7 +1121,7 @@ func runOfflineScenario6() ScenarioResult {
 		return nil, fmt.Errorf("产生了多余的模型调用 (callIdx=%d)", callIdx)
 	}
 
-	ag, err := agent.New(agent.Config{
+	ag, err := newDemoAgent(agent.Config{
 		Model:   modelA,
 		Options: optionsA,
 		Stream:  stream,
@@ -1197,7 +1197,7 @@ func runOfflineScenario7() ScenarioResult {
 	stream1 := func(ctx context.Context, req llm.Request) (llm.StreamReader, error) {
 		return createSingleTextStream(ctx, "hello no onEvent")
 	}
-	ag1, err := agent.New(agent.Config{
+	ag1, err := newDemoAgent(agent.Config{
 		Model:   llm.Model{ID: "mock-model", API: llm.APIKindOpenAI},
 		Stream:  stream1,
 		OnEvent: nil,
@@ -1226,7 +1226,7 @@ func runOfflineScenario7() ScenarioResult {
 			return nil, ctx.Err()
 		}
 	}
-	ag2, err := agent.New(agent.Config{
+	ag2, err := newDemoAgent(agent.Config{
 		Model:  llm.Model{ID: "mock-model", API: llm.APIKindOpenAI},
 		Stream: stream2,
 	})
@@ -1306,7 +1306,7 @@ func runOfflineScenario8() ScenarioResult {
 			return nil, ctx.Err()
 		}
 
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:  llm.Model{ID: "mock-model", API: llm.APIKindOpenAI},
 			Stream: stream,
 		})
@@ -1417,7 +1417,7 @@ func runOfflineScenario9() ScenarioResult {
 		w.Fail(llm.AssistantMessage{ErrorMessage: "502 Bad Gateway"}, fmt.Errorf("upstream 502"))
 		return r, nil
 	}
-	ag1, _ := agent.New(agent.Config{Model: llm.Model{ID: "m1", API: llm.APIKindOpenAI}, Stream: streamFail})
+	ag1, _ := newDemoAgent(agent.Config{Model: llm.Model{ID: "m1", API: llm.APIKindOpenAI}, Stream: streamFail})
 	defer ag1.Close()
 
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1490,7 +1490,7 @@ func runOfflineScenario9() ScenarioResult {
 		})
 		return r, nil
 	}
-	ag2, _ := agent.New(agent.Config{Model: llm.Model{ID: "m2", API: llm.APIKindOpenAI}, Stream: streamTrunc})
+	ag2, _ := newDemoAgent(agent.Config{Model: llm.Model{ID: "m2", API: llm.APIKindOpenAI}, Stream: streamTrunc})
 	defer ag2.Close()
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1562,7 +1562,7 @@ func runOfflineScenario9() ScenarioResult {
 			{Type: llm.TypeToolCall, ID: "cp", Name: "panic_tool"},
 		})
 	}
-	ag3, _ := agent.New(agent.Config{
+	ag3, _ := newDemoAgent(agent.Config{
 		Model:  llm.Model{ID: "m3", API: llm.APIKindOpenAI},
 		Stream: streamPanic,
 		Tools:  []agent.Tool{panicTool},
@@ -1697,7 +1697,7 @@ func runOfflineScenario10() ScenarioResult {
 			return createSingleTextStream(ctx, "normal task ok")
 		}
 
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:  llm.Model{ID: "m", API: llm.APIKindOpenAI},
 			Stream: stream,
 			Tools:  []agent.Tool{agent.NewAddTool()},
@@ -1809,7 +1809,7 @@ func runOfflineScenario11() ScenarioResult {
 		return createSingleTextStream(ctx, "fallback")
 	}
 
-	ag, err := agent.New(agent.Config{
+	ag, err := newDemoAgent(agent.Config{
 		Model:  modelAnthropic,
 		Stream: stream,
 		Tools:  []agent.Tool{agent.NewAddTool()},
@@ -2132,7 +2132,7 @@ func runOfflineScenario12() ScenarioResult {
 		}
 
 		stream, tools, action := m.setup(handleReady, onStarted)
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:   llm.Model{ID: "m", API: llm.APIKindOpenAI},
 			Stream:  stream,
 			Tools:   tools,
@@ -2341,7 +2341,7 @@ func runOfflineScenario13() ScenarioResult {
 			return r, nil
 		}
 
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:  llm.Model{ID: "m", API: llm.APIKindOpenAI},
 			Stream: stream,
 		})
@@ -2496,7 +2496,7 @@ func runOfflineScenario14() ScenarioResult {
 			return createSingleTextStream(ctx, "task2 ok")
 		}
 
-		ag, err := agent.New(agent.Config{
+		ag, err := newDemoAgent(agent.Config{
 			Model:  llm.Model{ID: "m", API: llm.APIKindOpenAI},
 			Stream: stream,
 		})

@@ -50,6 +50,9 @@ func NewManager(ctx context.Context, cfg runtimeconfig.Config) (*Manager, error)
 	if cfg.RecordTimeout < 0 || cfg.MaxParallelTools < 0 {
 		return nil, fmt.Errorf("运行限制不能为负数")
 	}
+	if cfg.RecordTimeout == 0 {
+		cfg.RecordTimeout = defaultRecordTimeout
+	}
 	path, err := canonicalDatabasePath(cfg.DatabasePath)
 	if err != nil {
 		return nil, err
@@ -235,7 +238,7 @@ func (m *Manager) initialize(ctx context.Context, id string, opts runtimeconfig.
 		}
 	}
 	r.agent, err = agent.New(agent.Config{Model: entry.Model, Options: entry.Options, SystemPrompt: m.config.SystemPrompt,
-		InitialHistory: messages, InitialOrigins: origins, NewRunID: uuid.NewString, Recorder: &recorder{runtime: r}, RecordTimeout: m.config.RecordTimeout,
+		InitialHistory: messages, InitialOrigins: origins, NewRunID: uuid.NewString,
 		Stream: m.config.Stream, Tools: tools, MaxParallelTools: m.config.MaxParallelTools,
 		OnEvent: func(event agent.Event) {
 			if m.config.OnEvent != nil {
@@ -250,7 +253,14 @@ func (m *Manager) initialize(ctx context.Context, id string, opts runtimeconfig.
 		r.agent.Close()
 		return nil, err
 	}
+	r.driver, err = r.agent.Driver()
+	if err != nil {
+		r.agent.Close()
+		return nil, err
+	}
+	r.driverDone = make(chan struct{})
 	r.state = runtimeconfig.StateReady
+	go r.drive()
 	ok = true
 	return r, nil
 }

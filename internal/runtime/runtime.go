@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"CodeAgent/internal/agent"
@@ -14,18 +15,20 @@ import (
 
 // Runtime 协调一个持锁会话。任务队列和执行状态仍由 Agent 维护。
 type Runtime struct {
-	mu        sync.Mutex
-	control   chan struct{}
-	manager   *Manager
-	session   *session.Session
-	agent     *agent.Agent
-	owner     *ownership
-	info      sessionconfig.SessionInfo
-	state     runtimeconfig.State
-	fault     error
-	closeOnce sync.Once
-	done      chan struct{}
-	closeErr  error
+	mu         sync.Mutex
+	control    chan struct{}
+	manager    *Manager
+	session    *session.Session
+	agent      *agent.Agent
+	driver     *agent.Driver
+	driverDone chan struct{}
+	owner      *ownership
+	info       sessionconfig.SessionInfo
+	state      runtimeconfig.State
+	fault      error
+	closeOnce  sync.Once
+	done       chan struct{}
+	closeErr   error
 }
 
 func (r *Runtime) SessionID() string { return r.info.ID }
@@ -51,11 +54,15 @@ func (r *Runtime) admission() error {
 	}
 }
 
-func (r *Runtime) Submit(ctx context.Context, message *llm.UserMessage) (*agent.RunHandle, error) {
+func (r *Runtime) Submit(ctx context.Context, message *llm.UserMessage) (*RunHandle, error) {
 	if err := r.admission(); err != nil {
 		return nil, err
 	}
-	return r.agent.Submit(ctx, message)
+	execution, err := r.agent.Submit(ctx, message)
+	if err != nil {
+		return nil, err
+	}
+	return &RunHandle{execution: execution}, nil
 }
 
 func (r *Runtime) Steer(message string) error {
@@ -74,7 +81,7 @@ func (r *Runtime) SetModel(ctx context.Context, selection sessionconfig.ModelSel
 		return err
 	}
 	saved := false
-	err = r.agent.SetModelWithPersistence(ctx, entry.Model, entry.Options, func(ctx context.Context) error {
+	err = r.agent.WithExecutionBoundary(ctx, false, func() error {
 		select {
 		case r.control <- struct{}{}:
 		case <-ctx.Done():
@@ -91,7 +98,7 @@ func (r *Runtime) SetModel(ctx context.Context, selection sessionconfig.ModelSel
 		r.info.ModelSelection = &selection
 		r.mu.Unlock()
 		saved = true
-		return nil
+		return r.agent.SetModel(entry.Model, entry.Options)
 	})
 	if err != nil && saved {
 		r.persistenceFault(err)
@@ -119,7 +126,7 @@ func (r *Runtime) BindWorkingDir(ctx context.Context, path string) error {
 // manage 串行管理操作；idle 操作另外预约 Agent 出队边界，不持 Agent 状态锁写库。
 func (r *Runtime) manage(ctx context.Context, idle bool, fn func() error) error {
 	if idle {
-		return r.agent.WithIdleOperation(ctx, func() error { return r.manage(ctx, false, fn) })
+		return r.agent.WithExecutionBoundary(ctx, true, func() error { return r.manage(ctx, false, fn) })
 	}
 	select {
 	case r.control <- struct{}{}:
@@ -187,7 +194,7 @@ func (r *Runtime) persistenceFault(err error) {
 	}
 	r.mu.Unlock()
 	if r.agent != nil {
-		r.agent.FailPersistence(err)
+		r.agent.StopExecution(fmt.Errorf("持久化失败: %w", r.firstFault()))
 	}
 }
 
@@ -200,6 +207,7 @@ func (r *Runtime) startClose() {
 		r.agent.RequestClose()
 		go func() {
 			err := r.agent.Close()
+			<-r.driverDone
 			// 等待仍在读取或管理的调用退出后释放会话所有权。
 			r.control <- struct{}{}
 			err = errors.Join(err, r.owner.release())

@@ -7,6 +7,7 @@ import (
 
 	"CodeAgent/internal/agent"
 	modelconfig "CodeAgent/internal/config"
+	"CodeAgent/internal/hooks"
 	sessionconfig "CodeAgent/internal/session/config"
 )
 
@@ -36,7 +37,8 @@ type Config struct {
 	SystemPrompt     string
 	MaxParallelTools int
 	RecordTimeout    time.Duration // 默认 5 秒，用于取消后的保存及故障收尾。
-	Tools            []agent.Tool  // nil 装配当前平台的七个基础工具；供嵌入和本地验证注入。
+	Hooks            *hooks.Registry
+	Tools            []agent.Tool // nil 装配当前平台的七个基础工具；供嵌入和本地验证注入。
 	// 回调应快速返回；不能同步等待当前 Run 或同步调用等待式 Close。
 	OnEvent func(sessionID string, event agent.Event)
 }

@@ -2,31 +2,127 @@ package runtime
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"strings"
+	"time"
 
 	"CodeAgent/internal/agent"
+	"CodeAgent/internal/hooks"
 	"CodeAgent/internal/llm"
 	sessionconfig "CodeAgent/internal/session/config"
 )
 
-// recorder 在执行路径同步保存，不依赖展示事件。每次失败立即关闭任务准入。
-type recorder struct{ runtime *Runtime }
-
-var _ agent.Recorder = (*recorder)(nil)
-
-func (p *recorder) checked(err error) error {
-	if err != nil {
-		p.runtime.persistenceFault(err)
-	}
-	return err
+// runRecords 只保存执行标识与 Session 记录的关联，不承载执行状态机。
+type runRecords struct {
+	started   bool
+	responses map[agent.CheckpointID]string
 }
 
-func (p *recorder) StartRun(ctx context.Context, id string, msg *llm.UserMessage) error {
-	_, err := p.runtime.session.StartRun(ctx, id, msg)
-	if err != nil {
-		return p.checked(err)
+// drive 是唯一驱动者。保存是固定流程，执行决策仍由 Agent 作出。
+func (r *Runtime) drive() {
+	defer close(r.driverDone)
+	records := make(map[string]*runRecords)
+	for {
+		checkpoint, err := r.driver.Next(context.Background())
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			r.persistenceFault(err)
+			continue
+		}
+		record := records[checkpoint.RunID]
+		if record == nil {
+			record = &runRecords{responses: make(map[agent.CheckpointID]string)}
+			records[checkpoint.RunID] = record
+		}
+		decision := r.coordinate(checkpoint, record)
+		if err := r.driver.Resolve(context.Background(), checkpoint.ID, decision); err != nil {
+			r.persistenceFault(err)
+		}
+		if checkpoint.Kind == agent.RunFinishing {
+			delete(records, checkpoint.RunID)
+		}
 	}
-	// 标题是辅助信息；保存失败不改变已经提交的任务。
+}
+
+// 每个保存节点使用独立、有界 context。故障后仍尝试保存在途结果及终态。
+func (r *Runtime) coordinate(c agent.Checkpoint, record *runRecords) agent.Decision {
+	ctx, cancel := context.WithTimeout(context.Background(), r.manager.config.RecordTimeout)
+	defer cancel()
+	var err error
+	switch c.Kind {
+	case agent.RunStarting:
+		_, err = r.session.StartRun(ctx, c.RunID, c.UserMessage)
+		if err == nil {
+			record.started = true
+			r.fillTitle(ctx, c.UserMessage)
+		}
+	case agent.InputConsumed:
+		_, err = r.session.AppendMessage(ctx, c.RunID, c.UserMessage, nil)
+	case agent.ModelRequestReady:
+		_, err = r.session.RecordStep(ctx, c.RunID)
+	case agent.ModelResponseReady:
+		origin := c.Origin
+		source := &sessionconfig.MessageModelOrigin{Provider: origin.Provider, API: origin.API, ModelID: origin.ModelID, BaseURL: origin.BaseURL}
+		entry, saveErr := r.session.AppendMessage(ctx, c.RunID, c.Response, source)
+		err = saveErr
+		if err == nil {
+			record.responses[c.ID] = entry.ID
+		}
+	case agent.ToolStarting:
+		hookCtx, stopHook := context.WithTimeout(c.Context, r.manager.config.RecordTimeout)
+		decision := r.manager.config.Hooks.BeforeTool(hookCtx, hooks.ToolRequest{SessionID: r.SessionID(), RunID: c.RunID, StepIndex: c.StepIndex, Call: *c.ToolCall})
+		stopHook()
+		if c.Context.Err() != nil {
+			return agent.Decision{Kind: agent.Skip, Reason: "因取消而未执行"}
+		}
+		if decision.Reason != "" {
+			return agent.Decision{Kind: agent.Skip, Reason: decision.Reason}
+		}
+		assistantID := record.responses[c.ResponseID]
+		if assistantID == "" {
+			err = fmt.Errorf("工具启动缺少已保存的 assistant 关联")
+		} else {
+			_, err = r.session.RecordToolStart(ctx, assistantID, c.ToolCall.ID)
+		}
+	case agent.ToolFinished:
+		assistantID := record.responses[c.ResponseID]
+		if assistantID == "" {
+			err = fmt.Errorf("工具结果缺少已保存的 assistant 关联")
+		} else {
+			_, err = r.session.AppendToolResult(ctx, assistantID, c.ToolResult)
+		}
+	case agent.RunFinishing:
+		if record.started {
+			result := *c.Result
+			fault := r.firstFault()
+			if fault != nil {
+				result.State = agent.RunStateError
+				result.StopReason, result.RawStopReason = "", ""
+				result.ErrorMessage = fmt.Sprintf("持久化失败: %v", fault)
+			}
+			_, err = r.session.FinishRun(ctx, c.RunID, sessionconfig.RunCompletion{State: sessionconfig.RunState(result.State), StopReason: llm.StopReason(result.StopReason), RawStopReason: result.RawStopReason, ErrorMessage: result.ErrorMessage})
+			if err == nil && result.State == agent.RunStateSuccess && result.StopReason == agent.RunStopCompleted {
+				r.manager.config.Hooks.Completed(ctx, hooks.Completion{SessionID: r.SessionID(), Result: result})
+			}
+			if err == nil && fault != nil {
+				return agent.Decision{Kind: agent.Stop, Error: fault}
+			}
+		}
+	default:
+		err = fmt.Errorf("未知执行节点 %q", c.Kind)
+	}
+	if err != nil {
+		r.persistenceFault(err)
+		return agent.Decision{Kind: agent.Stop, Error: r.firstFault()}
+	}
+	return agent.Decision{Kind: agent.Continue}
+}
+
+func (r *Runtime) firstFault() error { r.mu.Lock(); defer r.mu.Unlock(); return r.fault }
+func (r *Runtime) fillTitle(ctx context.Context, msg *llm.UserMessage) {
 	for _, b := range msg.Content {
 		if b.Type != llm.TypeText || strings.TrimSpace(b.Text) == "" {
 			continue
@@ -35,34 +131,9 @@ func (p *recorder) StartRun(ctx context.Context, id string, msg *llm.UserMessage
 		if len(title) > 80 {
 			title = title[:80]
 		}
-		_, _ = p.runtime.manager.service.SetTitleIfEmpty(ctx, p.runtime.SessionID(), string(title))
-		break
+		_, _ = r.manager.service.SetTitleIfEmpty(ctx, r.SessionID(), string(title))
+		return
 	}
-	return nil
 }
-func (p *recorder) RecordStep(ctx context.Context, id string) error {
-	_, err := p.runtime.session.RecordStep(ctx, id)
-	return p.checked(err)
-}
-func (p *recorder) AppendMessage(ctx context.Context, id string, msg llm.Message, origin *agent.ModelOrigin) (string, error) {
-	var source *sessionconfig.MessageModelOrigin
-	if origin != nil {
-		source = &sessionconfig.MessageModelOrigin{Provider: origin.Provider, API: origin.API, ModelID: origin.ModelID, BaseURL: origin.BaseURL}
-	}
-	entry, err := p.runtime.session.AppendMessage(ctx, id, msg, source)
-	return entry.ID, p.checked(err)
-}
-func (p *recorder) RecordToolStart(ctx context.Context, assistantID, callID string) error {
-	_, err := p.runtime.session.RecordToolStart(ctx, assistantID, callID)
-	return p.checked(err)
-}
-func (p *recorder) AppendToolResult(ctx context.Context, assistantID string, msg *llm.ToolResultMessage) error {
-	_, err := p.runtime.session.AppendToolResult(ctx, assistantID, msg)
-	return p.checked(err)
-}
-func (p *recorder) FinishRun(ctx context.Context, result agent.RunResult) error {
-	_, err := p.runtime.session.FinishRun(ctx, result.RunID, sessionconfig.RunCompletion{
-		State: sessionconfig.RunState(result.State), StopReason: llm.StopReason(result.StopReason), RawStopReason: result.RawStopReason, ErrorMessage: result.ErrorMessage,
-	})
-	return p.checked(err)
-}
+
+const defaultRecordTimeout = 5 * time.Second

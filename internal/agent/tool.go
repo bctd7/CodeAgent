@@ -120,7 +120,7 @@ type toolScheduler struct {
 	tools            map[string]Tool
 	maxParallelTools int
 	calls            []llm.ContentBlock
-	assistantID      string
+	responseID       CheckpointID
 
 	mu         sync.Mutex
 	stopped    bool
@@ -129,10 +129,10 @@ type toolScheduler struct {
 	results    []*llm.ToolResultMessage
 }
 
-func newToolScheduler(a *Agent, r *activeRun, stepIndex int, calls []llm.ContentBlock, assistantID string) *toolScheduler {
+func newToolScheduler(a *Agent, r *activeRun, stepIndex int, calls []llm.ContentBlock, responseID CheckpointID) *toolScheduler {
 	return &toolScheduler{
 		agent:            a,
-		assistantID:      assistantID,
+		responseID:       responseID,
 		run:              r,
 		stepIndex:        stepIndex,
 		tools:            a.tools,
@@ -253,6 +253,7 @@ func (s *toolScheduler) executeToolCall(item toolCallItem) {
 
 	var blocks []llm.ContentBlock
 	var isError bool
+	var skipped bool
 
 	if item.tool.Execute == nil {
 		blocks = []llm.ContentBlock{
@@ -260,46 +261,47 @@ func (s *toolScheduler) executeToolCall(item toolCallItem) {
 		}
 		isError = true
 	} else {
-		if s.agent.recorder != nil {
-			ctx, cancel := s.agent.cleanupContext()
-			err := s.agent.recorder.RecordToolStart(ctx, s.assistantID, call.ID)
-			cancel()
-			if err != nil {
-				s.agent.recordingFailure(s.run, err)
-				s.recordStop("因持久化失败而未执行")
-				return
-			}
+		_, decision := s.agent.handoff(s.run, Checkpoint{Kind: ToolStarting, StepIndex: s.stepIndex, ResponseID: s.responseID, ToolCall: &call}, s)
+		if decision.Kind == Stop {
+			s.recordStop("因执行故障而未执行")
+			return
 		}
-		s.agent.dispatcher.emit(Event{
-			Kind:       EventToolStart,
-			RunID:      s.run.id,
-			StepIndex:  s.stepIndex,
-			ToolCallID: call.ID,
-			ToolName:   call.Name,
-			Detail:     fmt.Sprintf("工具调用开始: %s", call.Name),
-		})
+		if decision.Kind == Skip {
+			blocks = []llm.ContentBlock{{Type: llm.TypeText, Text: decision.Reason}}
+			isError, skipped = true, true
+		} else {
+			s.agent.dispatcher.emit(Event{
+				Kind:       EventToolStart,
+				RunID:      s.run.id,
+				StepIndex:  s.stepIndex,
+				ToolCallID: call.ID,
+				ToolName:   call.Name,
+				Detail:     fmt.Sprintf("工具调用开始: %s", call.Name),
+			})
 
-		var execErr error
-		var panicVal any
-		blocks, execErr, panicVal = s.invokeTool(call, item.tool)
-		switch {
-		case panicVal != nil:
-			s.recordPanic(call.Name, panicVal)
-			blocks = []llm.ContentBlock{
-				{Type: llm.TypeText, Text: fmt.Sprintf("工具内部故障 (panic): %v", panicVal)},
+			var execErr error
+			var panicVal any
+			blocks, execErr, panicVal = s.invokeTool(call, item.tool)
+			switch {
+			case panicVal != nil:
+				s.recordPanic(call.Name, panicVal)
+				blocks = []llm.ContentBlock{
+					{Type: llm.TypeText, Text: fmt.Sprintf("工具内部故障 (panic): %v", panicVal)},
+				}
+				isError = true
+			case errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded):
+				blocks = []llm.ContentBlock{
+					{Type: llm.TypeText, Text: "执行已中断，副作用可能已发生"},
+				}
+				isError = true
+			case execErr != nil:
+				blocks = []llm.ContentBlock{
+					{Type: llm.TypeText, Text: fmt.Sprintf("工具执行错误: %v", execErr)},
+				}
+				isError = true
 			}
-			isError = true
-		case errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded):
-			blocks = []llm.ContentBlock{
-				{Type: llm.TypeText, Text: "执行已中断，副作用可能已发生"},
-			}
-			isError = true
-		case execErr != nil:
-			blocks = []llm.ContentBlock{
-				{Type: llm.TypeText, Text: fmt.Sprintf("工具执行错误: %v", execErr)},
-			}
-			isError = true
 		}
+
 	}
 
 	res := &llm.ToolResultMessage{
@@ -316,8 +318,12 @@ func (s *toolScheduler) executeToolCall(item toolCallItem) {
 	s.mu.Unlock()
 
 	s.saveResult(res)
+	kind := EventToolEnd
+	if skipped {
+		kind = EventToolSkipped
+	}
 	s.agent.dispatcher.emit(Event{
-		Kind:       EventToolEnd,
+		Kind:       kind,
 		RunID:      s.run.id,
 		StepIndex:  s.stepIndex,
 		ToolCallID: call.ID,
@@ -389,15 +395,29 @@ func (s *toolScheduler) fillSkippedResults() {
 	}
 }
 
-// saveResult 在每个工具完成时保存，不等待同组慢工具。
+// saveResult 交付每个最终结果，不等待同组慢工具。
 func (s *toolScheduler) saveResult(result *llm.ToolResultMessage) {
-	if s.agent.recorder == nil {
-		return
+	_, decision := s.agent.handoff(s.run, Checkpoint{Kind: ToolFinished, StepIndex: s.stepIndex, ResponseID: s.responseID, ToolResult: result}, nil)
+	if decision.Kind == Stop {
+		s.recordStop("因执行故障而未执行")
 	}
-	ctx, cancel := s.agent.cleanupContext()
-	defer cancel()
-	if err := s.agent.recorder.AppendToolResult(ctx, s.assistantID, result); err != nil {
-		s.agent.recordingFailure(s.run, err)
-		s.recordStop("因持久化失败而未执行")
+}
+
+// startPermissionLocked 是工具启动预约的原子边界。调用者持有 Agent 状态锁。
+func (s *toolScheduler) startPermissionLocked() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return s.stopReason
 	}
+	if s.agent.executionErr != nil {
+		return "因执行故障而未执行"
+	}
+	if s.run.ctx.Err() != nil || s.agent.status == AgentStatusClosed || s.agent.status == AgentStatusCancelling {
+		return "因取消而未执行"
+	}
+	if len(s.agent.steerQueue) > 0 {
+		return "因用户纠正而未执行"
+	}
+	return ""
 }

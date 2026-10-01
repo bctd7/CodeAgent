@@ -12,12 +12,15 @@ import (
 // Agent 是会话执行核心，负责内存历史维护、后台任务循环、工具调度。Loop才是真正的循环调度。
 // 纠正排队、任务取消以及跨模型跨协议切换。
 type Agent struct {
-	mu            sync.Mutex
-	boundary      chan struct{}
-	recorder      Recorder
-	newRunID      func() string
-	recordTimeout time.Duration
-	recordingErr  error
+	mu                 sync.Mutex
+	boundary           chan struct{}
+	newRunID           func() string
+	executionErr       error
+	driverAttached     bool
+	checkpointCounter  CheckpointID
+	checkpoints        []*pendingCheckpoint
+	pendingCheckpoints map[CheckpointID]*pendingCheckpoint
+	checkpointNotify   chan struct{}
 
 	// 配置与依赖
 	stream       StreamFunc
@@ -76,14 +79,9 @@ func New(cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("工具配置非法: %w", err)
 	}
 
-	if cfg.RecordTimeout < 0 {
-		return nil, fmt.Errorf("RecordTimeout 不能为负数")
-	}
-	if cfg.RecordTimeout == 0 {
-		cfg.RecordTimeout = defaultRecordTimeout
-	}
 	a := &Agent{
-		boundary: make(chan struct{}, 1), recorder: cfg.Recorder, newRunID: cfg.NewRunID, recordTimeout: cfg.RecordTimeout,
+		boundary: make(chan struct{}, 1), newRunID: cfg.NewRunID,
+		pendingCheckpoints: make(map[CheckpointID]*pendingCheckpoint), checkpointNotify: make(chan struct{}, 1),
 		stream:           cfg.Stream,
 		systemPrompt:     cfg.SystemPrompt,
 		tools:            toolMap,
@@ -124,10 +122,14 @@ func (a *Agent) Submit(ctx context.Context, message *llm.UserMessage) (*RunHandl
 		return nil, fmt.Errorf("Agent 已关闭，不接受新任务")
 	}
 
-	if a.recordingErr != nil {
-		err := a.recordingErr
+	if a.executionErr != nil {
+		err := a.executionErr
 		a.mu.Unlock()
 		return nil, err
+	}
+	if !a.driverAttached {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("Submit 前必须领取并运行 Driver")
 	}
 	a.runCounter++
 	runID := fmt.Sprintf("run_%d", a.runCounter)
@@ -181,45 +183,18 @@ func (a *Agent) Steer(message string) error {
 	return nil
 }
 
-// SetModel 请求切换模型及请求选项；由 Agent 在规定边界应用。
+// SetModel 成组记录模型及选项，在下一次请求准备边界应用。
 func (a *Agent) SetModel(model llm.Model, options llm.RequestOptions) error {
-	return a.SetModelWithPersistence(context.Background(), model, options, nil)
-}
-
-// SetModelWithPersistence 固定请求准备边界，在锁外保存配置，然后原子更新选择。
-// save 失败时原选择保持不变；外部事件在释放边界后分发。
-func (a *Agent) SetModelWithPersistence(ctx context.Context, model llm.Model, options llm.RequestOptions, save func(context.Context) error) error {
-	select {
-	case a.boundary <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 	a.mu.Lock()
-	if a.status == AgentStatusClosed || a.recordingErr != nil {
-		err := a.recordingErr
+	if a.status == AgentStatusClosed || a.executionErr != nil {
+		err := a.executionErr
 		if err == nil {
 			err = fmt.Errorf("Agent 已关闭")
 		}
 		a.mu.Unlock()
-		<-a.boundary
 		return err
 	}
-	a.mu.Unlock()
-	if save != nil {
-		if err := save(ctx); err != nil {
-			<-a.boundary
-			return err
-		}
-	}
-	a.mu.Lock()
-	// Close 可与数据库保存并行；调用方将不一致实例置为故障并关闭。
-	if a.status == AgentStatusClosed || a.recordingErr != nil {
-		a.mu.Unlock()
-		<-a.boundary
-		return fmt.Errorf("模型选择保存后 Agent 已不可用")
-	}
-	a.pendingModel = &model
-	a.pendingOptions = &options
+	a.pendingModel, a.pendingOptions = &model, &options
 	runID := ""
 	if a.currentRun != nil {
 		runID = a.currentRun.id
@@ -229,8 +204,8 @@ func (a *Agent) SetModelWithPersistence(ctx context.Context, model llm.Model, op
 		a.changeModel()
 	}
 	a.mu.Unlock()
-	<-a.boundary
-	a.dispatcher.drain()
+	// 外层可能仍持执行边界，回调只能在协调完成后分发。
+	go a.dispatcher.drain()
 	return nil
 }
 

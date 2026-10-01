@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"time"
 
 	"CodeAgent/internal/llm"
 )
@@ -85,10 +84,8 @@ type Snapshot struct {
 
 // Config 包含创建 Agent 所需的配置与依赖。
 type Config struct {
-	Recorder       Recorder                              // nil 保留纯内存执行方式。
 	NewRunID       func() string                         // Runtime 注入 UUID；nil 沿用实例内编号。
 	InitialOrigins map[*llm.AssistantMessage]ModelOrigin // 键必须对应 InitialHistory 中的实际消息对象。
-	RecordTimeout  time.Duration                         // 独立收尾保存的超时；零使用默认 5 秒。
 	Model          llm.Model
 	Options        llm.RequestOptions
 	SystemPrompt   string

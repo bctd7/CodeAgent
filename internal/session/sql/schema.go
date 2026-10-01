@@ -66,4 +66,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS entries_assistant_tool_call ON entries(assista
 const SetUserVersionV2SQL = `PRAGMA user_version = 2`
 
 const SetUserVersionV3SQL = `PRAGMA user_version = 3`
-const AddModelSelectionSQL = `ALTER TABLE sessions ADD COLUMN model_selection_json TEXT`

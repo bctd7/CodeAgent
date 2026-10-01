@@ -49,3 +49,5 @@ const SelectCandidateAssistantsSQL = `SELECT id, message_json FROM entries WHERE
 
 // UpdateBackfilledToolEntrySQL 回填 entries 记录的 assistant 关联字段。
 const UpdateBackfilledToolEntrySQL = `UPDATE entries SET assistant_entry_id = ?, tool_call_id = ? WHERE id = ?`
+
+const AddModelSelectionSQL = `ALTER TABLE sessions ADD COLUMN model_selection_json TEXT`

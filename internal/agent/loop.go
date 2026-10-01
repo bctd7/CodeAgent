@@ -19,7 +19,6 @@ type activeRun struct {
 	messages   []llm.Message
 	usage      map[string]llm.Usage
 	totalUsage llm.Usage
-	persisted  bool
 	finishing  bool
 }
 
@@ -54,17 +53,11 @@ func (a *Agent) runLoop() {
 func (a *Agent) executeRun(run *activeRun) {
 	defer run.cancel()
 
-	if a.recorder != nil {
-		ctx, cancel := a.cleanupContext()
-		err := a.recorder.StartRun(ctx, run.id, run.userMsg)
-		cancel()
-		if err != nil {
-			a.recordingFailure(run, err)
-			a.mu.Lock()
-			a.finishRunAndUnlock(run, RunResult{}, nil)
-			return
-		}
-		run.persisted = true
+	_, decision := a.handoff(run, Checkpoint{Kind: RunStarting, UserMessage: run.userMsg}, nil)
+	if decision.Kind == Stop {
+		a.mu.Lock()
+		a.finishRunAndUnlock(run, RunResult{}, nil)
+		return
 	}
 	a.dispatcher.emit(Event{
 		Kind:      EventRunStart,
@@ -105,7 +98,8 @@ func (a *Agent) executeRun(run *activeRun) {
 		a.mu.Unlock()
 		for _, text := range steers {
 			msg := &llm.UserMessage{Role: llm.RoleUser, Content: []llm.ContentBlock{{Type: llm.TypeText, Text: "[用户纠正]: " + text}}, Timestamp: time.Now()}
-			if _, err := a.appendRecordedMessage(run, msg, nil); err != nil {
+			_, decision := a.handoff(run, Checkpoint{Kind: InputConsumed, UserMessage: msg}, nil)
+			if decision.Kind == Stop {
 				a.mu.Lock()
 				<-a.boundary
 				a.finishRunAndUnlock(run, RunResult{}, nil)
@@ -135,19 +129,18 @@ func (a *Agent) executeRun(run *activeRun) {
 		a.mu.Unlock()
 		<-a.boundary
 
-		if a.recorder != nil {
-			ctx, cancel := a.cleanupContext()
-			err := a.recorder.RecordStep(ctx, run.id)
-			cancel()
-			if err != nil {
-				a.recordingFailure(run, err)
-				a.mu.Lock()
-				a.finishRunAndUnlock(run, RunResult{}, nil)
-				return
-			}
+		_, decision := a.handoff(run, Checkpoint{Kind: ModelRequestReady, StepIndex: stepIndex, Request: &req}, nil)
+		if decision.Kind == Stop {
+			a.mu.Lock()
+			a.finishRunAndUnlock(run, RunResult{}, nil)
+			return
 		}
 		a.mu.Lock()
 		run.steps++
+		if !a.canStartWorkLocked(run) {
+			a.finishRunAndUnlock(run, RunResult{}, nil)
+			return
+		}
 		a.mu.Unlock()
 		a.dispatcher.emit(Event{
 			Kind:      EventStepStart,
@@ -180,153 +173,41 @@ func (a *Agent) executeRun(run *activeRun) {
 
 		// 5. 集中记录模型最终消息、同源来源与用量
 		origin := ModelOrigin{Provider: currentModel.Provider, API: currentModel.API, ModelID: currentModel.ID, BaseURL: currentModel.BaseURL}
-		assistantID, recordErr := a.appendRecordedMessage(run, &assistantMsg, &origin)
+		responseID, decision := a.handoff(run, Checkpoint{Kind: ModelResponseReady, StepIndex: stepIndex, Response: &assistantMsg, Origin: &origin}, nil)
 		a.recordResponseAndUsage(run, currentModel, &assistantMsg)
-		if recordErr != nil {
-			stepEnd := Event{Kind: EventStepEnd, RunID: run.id, StepIndex: stepIndex, Detail: recordErr.Error()}
+		if decision.Kind == Stop {
+			stepEnd := Event{Kind: EventStepEnd, RunID: run.id, StepIndex: stepIndex, Detail: decision.Error.Error()}
 			a.mu.Lock()
 			a.finishRunAndUnlock(run, RunResult{}, &stepEnd)
 			return
 		}
 
-		// 6. 处理取消终态
-		if run.ctx.Err() != nil || assistantMsg.State == llm.StateAborted {
-			stepEnd := Event{
-				Kind:      EventStepEnd,
-				RunID:     run.id,
-				StepIndex: stepIndex,
-				Detail:    "任务已取消",
-				Timestamp: time.Now(),
-			}
-			a.mu.Lock()
-			a.finishRunAndUnlock(run, RunResult{
-				State:        RunStateAborted,
-				ErrorMessage: "任务已被取消",
-				Error:        run.ctx.Err(),
-			}, &stepEnd)
+		result, toolCalls := classifyResponse(&assistantMsg, streamResult.InternalErr)
+		stepEnd := Event{Kind: EventStepEnd, RunID: run.id, StepIndex: stepIndex, Timestamp: time.Now()}
+		a.mu.Lock()
+		if !a.canStartWorkLocked(run) {
+			stepEnd.Detail = "任务已停止"
+			a.finishRunAndUnlock(run, RunResult{}, &stepEnd)
 			return
 		}
-
-		// 7. 处理服务端失败终态
-		if assistantMsg.State == llm.StateError {
-			stepEnd := Event{
-				Kind:      EventStepEnd,
-				RunID:     run.id,
-				StepIndex: stepIndex,
-				Detail:    fmt.Sprintf("模型调用失败: %s", assistantMsg.ErrorMessage),
-				Timestamp: time.Now(),
+		if result != nil {
+			stepEnd.Detail = result.ErrorMessage
+			if stepEnd.Detail == "" {
+				stepEnd.Detail = "模型生成回答完成"
 			}
-			stopReason := RunStopReason("")
-			if assistantMsg.StopReason == llm.StopSafety {
-				stopReason = RunStopSafety
-			}
-			a.mu.Lock()
-			a.finishRunAndUnlock(run, RunResult{
-				State:         RunStateError,
-				StopReason:    stopReason,
-				RawStopReason: assistantMsg.RawStopReason,
-				ErrorMessage:  assistantMsg.ErrorMessage,
-				Error:         streamResult.InternalErr,
-			}, &stepEnd)
-			return
-		}
-
-		// 8. 处理输出截断终态
-		if assistantMsg.StopReason == llm.StopLength {
-			stepEnd := Event{
-				Kind:      EventStepEnd,
-				RunID:     run.id,
-				StepIndex: stepIndex,
-				Detail:    "模型输出达到最大长度被截断",
-				Timestamp: time.Now(),
-			}
-			a.mu.Lock()
-			a.finishRunAndUnlock(run, RunResult{
-				State:         RunStateSuccess,
-				StopReason:    RunStopTruncated,
-				RawStopReason: assistantMsg.RawStopReason,
-				ErrorMessage:  "模型输出达到最大长度被截断",
-			}, &stepEnd)
-			return
-		}
-
-		// 9. 提取工具调用
-		var toolCalls []llm.ContentBlock
-		for _, b := range assistantMsg.Content {
-			if b.Type == llm.TypeToolCall {
-				toolCalls = append(toolCalls, b)
-			}
-		}
-
-		// 检查状态与工具结构的严格一致性：仅 StateSuccess + StopToolUse 方可执行工具
-		if (len(toolCalls) > 0) != (assistantMsg.StopReason == llm.StopToolUse) {
-			errMsg := "模型响应以 tool_use 结束，但没有工具调用"
-			if len(toolCalls) > 0 {
-				errMsg = fmt.Sprintf("模型响应包含工具调用，但 StopReason 为 %q (期望 %q)", assistantMsg.StopReason, llm.StopToolUse)
-			}
-			stepEnd := Event{
-				Kind:      EventStepEnd,
-				RunID:     run.id,
-				StepIndex: stepIndex,
-				Detail:    errMsg,
-				Timestamp: time.Now(),
-			}
-			a.mu.Lock()
-			a.finishRunAndUnlock(run, RunResult{
-				State:         RunStateError,
-				RawStopReason: assistantMsg.RawStopReason,
-				ErrorMessage:  errMsg,
-			}, &stepEnd)
-			return
-		}
-
-		// 10. 无工具调用，模型正常给出文本回答
-		if len(toolCalls) == 0 {
-			stepEnd := Event{
-				Kind:      EventStepEnd,
-				RunID:     run.id,
-				StepIndex: stepIndex,
-				Detail:    fmt.Sprintf("第 %d 步完成 (模型生成回答)", stepIndex),
-				Timestamp: time.Now(),
-			}
-
-			// 成功结束边界：原子核验纠正与终态提交，杜绝接受纠正后丢失的窗口
-			a.mu.Lock()
-			if a.status != AgentStatusClosed && a.status != AgentStatusCancelling && run.ctx.Err() == nil && len(a.steerQueue) > 0 {
+			// 正常回答完成前接受的纠正，仍由同一个 Run 继续处理。
+			if result.State == RunStateSuccess && result.StopReason == RunStopCompleted && len(a.steerQueue) > 0 {
 				a.mu.Unlock()
 				a.dispatcher.emit(stepEnd)
 				continue
 			}
-
-			a.finishRunAndUnlock(run, RunResult{
-				State:         RunStateSuccess,
-				StopReason:    RunStopCompleted,
-				RawStopReason: assistantMsg.RawStopReason,
-			}, &stepEnd)
+			a.finishRunAndUnlock(run, *result, &stepEnd)
 			return
 		}
-
-		// 检查整批工具调用的 ID 完整性与唯一性，杜绝歧义调用
-		if idErr := validateToolCallBatch(toolCalls); idErr != nil {
-			stepEnd := Event{
-				Kind:      EventStepEnd,
-				RunID:     run.id,
-				StepIndex: stepIndex,
-				Detail:    idErr.Error(),
-				Timestamp: time.Now(),
-			}
-			a.mu.Lock()
-			a.finishRunAndUnlock(run, RunResult{
-				State:         RunStateError,
-				RawStopReason: assistantMsg.RawStopReason,
-				ErrorMessage:  idErr.Error(),
-				Error:         idErr,
-			}, &stepEnd)
-			return
-		}
+		a.mu.Unlock()
 
 		// 11. 调度执行工具
-		scheduler := newToolScheduler(a, run, stepIndex, toolCalls, assistantID)
+		scheduler := newToolScheduler(a, run, stepIndex, toolCalls, responseID)
 		results, panicErr := scheduler.execute()
 
 		// 工具结果严格按模型原始调用顺序追加至历史
@@ -339,13 +220,7 @@ func (a *Agent) executeRun(run *activeRun) {
 		}
 		a.mu.Unlock()
 
-		stepEnd := Event{
-			Kind:      EventStepEnd,
-			RunID:     run.id,
-			StepIndex: stepIndex,
-			Detail:    fmt.Sprintf("第 %d 步完成 (工具执行完毕, 数量: %d)", stepIndex, len(toolCalls)),
-			Timestamp: time.Now(),
-		}
+		stepEnd.Detail = fmt.Sprintf("工具执行完毕 (数量: %d)", len(toolCalls))
 
 		a.mu.Lock()
 		if panicErr != nil {
@@ -368,7 +243,7 @@ func (a *Agent) executeRun(run *activeRun) {
 	}
 }
 
-// prepareRequest 在持有 a.mu 时消费待处理纠正、投影请求并推进步骤计数。
+// prepareRequest 在持有 a.mu 时投影历史并固定本次请求；尚不计入调用次数。
 func (a *Agent) prepareRequest(run *activeRun) (llm.Request, int, llm.Model, error) {
 	req, err := prepareRequestHistory(
 		a.history,
@@ -408,8 +283,8 @@ func (a *Agent) callStreamAndForward(ctx context.Context, runID string, stepInde
 	return reader.Result(), nil
 }
 
-// finishRunAndUnlock 在持有 a.mu 时确定并保存当前 Run 的终态。
-// 保存结果后将完成事件入队，解锁后统一分发。调用方调用后必须立即退出 executeRun。
+// finishRunAndUnlock 持锁确定终态，交接确认后保存内存结果并分发完成事件。
+// 调用方调用后必须立即退出 executeRun。
 func (a *Agent) finishRunAndUnlock(run *activeRun, result RunResult, stepEnd *Event) {
 	var droppedTasks []droppedTaskInfo
 
@@ -444,34 +319,22 @@ func (a *Agent) finishRunAndUnlock(run *activeRun, result RunResult, stepEnd *Ev
 		}
 	}
 
+	if a.executionErr != nil {
+		result.State = RunStateError
+		result.StopReason, result.RawStopReason = "", ""
+		result.ErrorMessage, result.Error = a.executionErr.Error(), a.executionErr
+	}
 	run.finishing = true
 	a.mu.Unlock()
-	if a.recorder != nil && run.persisted {
-		ctx, cancel := a.cleanupContext()
-		// 故障原因先进入尽力保存的任务结果。
-		a.mu.Lock()
-		storageErr := a.recordingErr
-		a.mu.Unlock()
-		if storageErr != nil {
-			result.State = RunStateError
-			result.StopReason = ""
-			result.RawStopReason = ""
-			result.ErrorMessage = storageErr.Error()
-			result.Error = storageErr
-		}
-		err := a.recorder.FinishRun(ctx, result)
-		cancel()
-		if err != nil {
-			a.recordingFailure(run, err)
-		}
-	}
+	_, decision := a.handoff(run, Checkpoint{Kind: RunFinishing, Result: &result}, nil)
 	a.mu.Lock()
-	if a.recordingErr != nil {
+	// 正常确认表示终态已经提交；之后的实例故障不能改写该结果。
+	if decision.Kind == Stop {
 		result.State = RunStateError
 		result.StopReason = ""
 		result.RawStopReason = ""
-		result.ErrorMessage = a.recordingErr.Error()
-		result.Error = a.recordingErr
+		result.ErrorMessage = a.executionErr.Error()
+		result.Error = a.executionErr
 	}
 	// 成功或单任务取消后保留排队任务；失败或截断则丢弃。
 	truncated := result.State == RunStateSuccess && result.StopReason == RunStopTruncated

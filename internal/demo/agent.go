@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,7 +73,7 @@ func runAgentExperiment(reader *bufio.Reader, entry config.ModelEntry, stream St
 			evt.Kind, runID, stepStr, toolName, callID, detail)
 	}
 
-	ag, err := agent.New(agent.Config{
+	ag, err := newDemoAgent(agent.Config{
 		Model:            entry.Model,
 		Options:          entry.Options,
 		SystemPrompt:     "你是一个全能编程与计算助手，能合理调用工具帮助用户解决问题。",
@@ -369,4 +370,33 @@ func printRunResult(res agent.RunResult) {
 		fmt.Printf("  底层 Error 对象:       %v\n", res.Error)
 	}
 	fmt.Println("==================================================")
+}
+
+// newDemoAgent 用显式驱动确认纯内存节点；没有 Session 或保存策略。
+func newDemoAgent(cfg agent.Config) (*agent.Agent, error) {
+	a, err := agent.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	driver, err := a.Driver()
+	if err != nil {
+		a.Close()
+		return nil, err
+	}
+	go func() {
+		for {
+			checkpoint, err := driver.Next(context.Background())
+			if err == io.EOF {
+				return
+			}
+			if err != nil {
+				a.StopExecution(err)
+				continue
+			}
+			if err := driver.Resolve(context.Background(), checkpoint.ID, agent.Decision{Kind: agent.Continue}); err != nil {
+				a.StopExecution(err)
+			}
+		}
+	}()
+	return a, nil
 }

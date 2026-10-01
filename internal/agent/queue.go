@@ -112,7 +112,7 @@ func (a *Agent) enqueueRunLocked(runID string, handle *RunHandle, ctx context.Co
 // 若队列为空或所有任务均已取消，置 a.currentRun = nil 且 a.status = AgentStatusIdle。
 // 调用方必须持有 a.mu。
 func (a *Agent) popNextRunLocked() (*activeRun, []droppedTaskInfo) {
-	if a.status == AgentStatusClosed {
+	if a.status == AgentStatusClosed || a.executionErr != nil {
 		return nil, nil
 	}
 

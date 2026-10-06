@@ -17,7 +17,7 @@ import (
 type Runtime struct {
 	mu         sync.Mutex
 	control    chan struct{}
-	manager    *Manager
+	host       *Host
 	session    *session.Session
 	agent      *agent.Agent
 	driver     *agent.Driver
@@ -34,9 +34,9 @@ type Runtime struct {
 func (r *Runtime) SessionID() string { return r.info.ID }
 
 func (r *Runtime) admission() error {
-	r.manager.mu.Lock()
-	closing := r.manager.closing
-	r.manager.mu.Unlock()
+	r.host.mu.Lock()
+	closing := r.host.closing
+	r.host.mu.Unlock()
 	if closing {
 		return runtimeconfig.ErrClosing
 	}
@@ -73,7 +73,7 @@ func (r *Runtime) Steer(message string) error {
 }
 
 func (r *Runtime) SetModel(ctx context.Context, selection sessionconfig.ModelSelection) error {
-	entry, err := r.manager.resolveModel(selection)
+	entry, err := r.host.resolveModel(selection)
 	if err != nil {
 		return err
 	}
@@ -83,7 +83,7 @@ func (r *Runtime) SetModel(ctx context.Context, selection sessionconfig.ModelSel
 	saved := false
 	err = r.agent.WithExecutionBoundary(ctx, false, func() error {
 		return r.manage(ctx, false, func() error {
-			if err := r.manager.service.SetModelSelection(ctx, r.SessionID(), selection); err != nil {
+			if err := r.host.service.SetModelSelection(ctx, r.SessionID(), selection); err != nil {
 				return err
 			}
 			r.mu.Lock()
@@ -101,10 +101,10 @@ func (r *Runtime) SetModel(ctx context.Context, selection sessionconfig.ModelSel
 
 func (r *Runtime) BindWorkingDir(ctx context.Context, path string) error {
 	return r.manage(ctx, true, func() error {
-		if err := r.manager.service.BindWorkingDir(ctx, r.SessionID(), path); err != nil {
+		if err := r.host.service.BindWorkingDir(ctx, r.SessionID(), path); err != nil {
 			return err
 		}
-		info, err := r.manager.service.GetSession(ctx, r.SessionID())
+		info, err := r.host.service.GetSession(ctx, r.SessionID())
 		if err != nil {
 			r.persistenceFault(err)
 			return err

@@ -13,6 +13,7 @@ import (
 
 	"CodeAgent/internal/agent"
 	"CodeAgent/internal/llm"
+	"CodeAgent/internal/tools/basic/common"
 
 	"github.com/pmezard/go-difflib/difflib"
 	"golang.org/x/text/unicode/norm"
@@ -89,8 +90,8 @@ type fuzzyMatchResult struct {
 	contentForReplacement string
 }
 
-// NewEditTool 构造 edit 工具实例。
-func NewEditTool(workingDir string) agent.Tool {
+// NewEdit 构造 edit 工具实例。
+func NewEdit(workingDir string) agent.Tool {
 	return agent.Tool{
 		Tool: llm.Tool{
 			Name: editToolName,
@@ -117,7 +118,7 @@ func executeEdit(ctx context.Context, workingDir string, args map[string]any) ([
 		return nil, err
 	}
 
-	resolvedPath, err := resolvePath(workingDir, pathStr)
+	resolvedPath, err := common.ResolvePath(workingDir, pathStr)
 	if err != nil {
 		return nil, err
 	}

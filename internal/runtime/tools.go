@@ -7,17 +7,17 @@ import (
 
 	"CodeAgent/internal/agent"
 	"CodeAgent/internal/llm"
-	"CodeAgent/internal/tools/basic"
+	"CodeAgent/internal/tools"
 )
 
 // assembleTools 从现有构造函数取得稳定定义；执行时使用首次绑定的目录。
 // 未绑定时的占位路径仅用于构造说明和 Schema，不会用于执行。
 func (r *Runtime) assembleTools() ([]agent.Tool, error) {
-	if r.manager.config.Tools != nil {
-		return r.manager.config.Tools, nil
+	if r.host.config.Tools != nil {
+		return r.host.config.Tools, nil
 	}
-	root := filepath.VolumeName(r.manager.database) + string(filepath.Separator)
-	definitions, err := basic.New(basic.Config{WorkingDir: root})
+	root := filepath.VolumeName(r.host.config.DatabasePath) + string(filepath.Separator)
+	definitions, err := tools.New(tools.Config{WorkingDir: root})
 	if err != nil {
 		return nil, err
 	}
@@ -31,11 +31,11 @@ func (r *Runtime) assembleTools() ([]agent.Tool, error) {
 			if dir == "" {
 				return nil, fmt.Errorf("会话尚未绑定工作目录，不能执行 %s", name)
 			}
-			tools, err := basic.New(basic.Config{WorkingDir: dir})
+			boundTools, err := tools.New(tools.Config{WorkingDir: dir})
 			if err != nil {
 				return nil, err
 			}
-			for _, t := range tools {
+			for _, t := range boundTools {
 				if t.Name == name {
 					return t.Execute(ctx, callID, args, progress)
 				}

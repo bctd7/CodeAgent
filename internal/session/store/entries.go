@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -115,6 +116,14 @@ func (tx *Tx) ToolResultEntryExists(ctx context.Context, assistantEntryID, toolC
 
 // InsertToolExecution 插入工具启动记录，不执行工具。
 func (tx *Tx) InsertToolExecution(ctx context.Context, te config.ToolExecution) error {
+	var arguments any
+	if te.Arguments != nil {
+		data, err := json.Marshal(*te.Arguments)
+		if err != nil {
+			return err
+		}
+		arguments = string(data)
+	}
 	startedStr := te.StartedAt.UTC().Format(time.RFC3339Nano)
 	_, err := tx.tx.ExecContext(
 		ctx,
@@ -124,6 +133,7 @@ func (tx *Tx) InsertToolExecution(ctx context.Context, te config.ToolExecution) 
 		te.AssistantEntryID,
 		te.ToolCallID,
 		startedStr,
+		arguments,
 	)
 	if err != nil {
 		return fmt.Errorf("插入工具启动记录: %w", err)
@@ -193,6 +203,7 @@ func (tx *Tx) ListToolExecutionsByRun(ctx context.Context, runID, sessionID stri
 			startedAtRaw  string
 			finishedAtRaw sql.NullString
 			resultEntryID sql.NullString
+			arguments     sql.NullString
 		)
 
 		if err := rows.Scan(
@@ -203,10 +214,20 @@ func (tx *Tx) ListToolExecutionsByRun(ctx context.Context, runID, sessionID stri
 			&startedAtRaw,
 			&finishedAtRaw,
 			&resultEntryID,
+			&arguments,
 		); err != nil {
 			return nil, fmt.Errorf("读取工具执行行: %w", err)
 		}
 
+		if arguments.Valid {
+			var args map[string]any
+			decoder := json.NewDecoder(bytes.NewBufferString(arguments.String))
+			decoder.UseNumber()
+			if err := decoder.Decode(&args); err != nil {
+				return nil, fmt.Errorf("decode tool arguments: %w", err)
+			}
+			te.Arguments = &args
+		}
 		startedAt, err := time.Parse(time.RFC3339Nano, startedAtRaw)
 		if err != nil {
 			return nil, fmt.Errorf("解析工具启动时间: %w", err)

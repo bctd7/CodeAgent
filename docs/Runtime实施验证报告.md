@@ -1,12 +1,14 @@
 # Runtime 实施与验证记录
 
+2026-10-02 命名更新：多会话管理入口改为 Host / NewHost，文件改为 host.go；单会话 Runtime 与持久化 Session 名称不变。下文验收记录仍属于原实施日期，不代表本次重新验证。
+
 日期：2026-10-01。依据当前 `待做计划.md` 的 Runtime 任务实施，保留现有 Agent 循环和 Session 目录边界。未修改 demo、工具算法、LLM、Provider 或实际配置；未提交或推送 Git。
 
 ## 实现范围和文件职责
 
 | 文件 | 职责 |
 | --- | --- |
-| `internal/runtime/manager.go` | 共享数据库初始化、多会话登记、并发打开复用、列表与管理入口、整体关闭 |
+| `internal/runtime/host.go` | 共享数据库初始化、多会话登记、并发打开复用、列表与管理入口、整体关闭 |
 | `internal/runtime/runtime.go` | 单会话操作、准入与故障状态、读取、绑定目录、模型选择和关闭等待 |
 | `internal/runtime/persistence.go` | 同步实现 Agent Recorder；调用 Session 保存执行事实，转换模型来源及终态 |
 | `internal/runtime/ownership.go` | 数据库路径规范化、进程内独占登记、会话锁文件生命周期 |
@@ -19,7 +21,7 @@ Runtime 不维护第二套 Run 队列或模型循环，不直接执行 Session S
 
 ## 应用层调用接口
 
-Manager 提供 `NewManager`、`CreateSession`、`ListSessions`、`OpenSession`、`RenameSession`、`ArchiveSession`、`UnarchiveSession`、`CloseSession`、`Close`。
+Host 提供 `NewHost`、`CreateSession`、`ListSessions`、`OpenSession`、`RenameSession`、`ArchiveSession`、`UnarchiveSession`、`CloseSession`、`Close`。
 
 Runtime 提供 `SessionID`、`Submit`、`Steer`、`SetModel`、`BindWorkingDir`、`GetCurrentHistory`、`GetRun`、`ListRuns`、`Snapshot`、`Close`。`Submit` 返回原有 `*agent.RunHandle`，继续使用其 `ID`、`Cancel`、`Wait`。
 
@@ -28,7 +30,7 @@ Runtime 提供 `SessionID`、`Submit`、`Steer`、`SetModel`、`BindWorkingDir`�
 ```go
 models, err := modelconfig.Load("config.toml")
 if err != nil { return err }
-manager, err := runtime.NewManager(ctx, runtimeconfig.Config{
+host, err := runtime.NewHost(ctx, runtimeconfig.Config{
     DatabasePath: "sessions.db",
     Models: models,
     OnEvent: func(sessionID string, event agent.Event) {
@@ -37,18 +39,18 @@ manager, err := runtime.NewManager(ctx, runtimeconfig.Config{
 })
 if err != nil { return err }
 
-info, err := manager.CreateSession(ctx, runtimeconfig.CreateSessionOptions{
+info, err := host.CreateSession(ctx, runtimeconfig.CreateSessionOptions{
     Model: sessionconfig.ModelSelection{Ref: "provider/alias"},
     // WorkingDir 可省略；未绑定时可以聊天，但文件及命令工具明确返回业务错误。
 })
 if err != nil { return err }
-conversation, err := manager.OpenSession(ctx, info.ID, runtimeconfig.OpenSessionOptions{})
+conversation, err := host.OpenSession(ctx, info.ID, runtimeconfig.OpenSessionOptions{})
 if err != nil { return err }
 handle, err := conversation.Submit(taskContext, userMessage)
 if err != nil { return err }
 result, waitErr := handle.Wait(waitContext)
 // waitErr 表示等待失败；任务结果另看 result.State / ErrorMessage。
-// 程序退出时 manager.Close(shutdownContext)；超时不代表后台收尾已经完成。
+// 程序退出时 host.Close(shutdownContext)；超时不代表后台收尾已经完成。
 ```
 
 没有默认模型。模型选择仅保存 `ModelSelection.Ref`；本轮没有增加请求参数覆盖接口，参数、凭据和协议选项沿用当前 TOML 装配结果。API Key 和 Headers 不进入模型选择、历史来源或 Runtime 快照。来源地址拒绝用户信息、查询参数和片段，避免将地址中的凭据持久化。
@@ -88,7 +90,7 @@ Submit：Agent 入队 → 返回 Handle（此时不创建数据库 Run）
 
 Close：停止准入 → 取消当前及排队任务 → 等待 Agent/记录收尾
        → 等待仍在进行的会话管理/读取操作 → 释放所有权 → 实例 Closed
-Manager.Close：停止新增操作 → 请求所有实例关闭并等待 → 关闭共享数据库
+Host.Close：停止新增操作 → 请求所有实例关闭并等待 → 关闭共享数据库
 ```
 
 模型消息的 LLM 完成事件可实时展示，它不表示整个 Run 已经持久化完成；最终完成以 Run 结果及 RunEnd 为准。普通取消后实例仍可工作，Close 不删除、不自动归档会话。关闭等待 context 超时，只结束本次等待，关闭过程、实例登记及所有权仍保留。

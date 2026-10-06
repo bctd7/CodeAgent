@@ -784,7 +784,7 @@ func runOnlineModelSwitchScenario(entryOpenAI, entryAnthropic *config.ModelEntry
 		Status:   "失败",
 	}
 
-	// Part A: 生成期间切换 (OpenAI -> Anthropic)
+	// 第一部分：生成期间切换（OpenAI → Anthropic）
 	var step2TargetModel string
 	var step2TargetAPI llm.APIKind
 	var reqMu sync.Mutex
@@ -866,7 +866,7 @@ func runOnlineModelSwitchScenario(entryOpenAI, entryAnthropic *config.ModelEntry
 		return res
 	}
 
-	// Part B: 工具执行中跨协议切换 (Anthropic -> OpenAI)
+	// 第二部分：工具执行中跨协议切换（Anthropic → OpenAI）
 	var step2BModel string
 	var step2BAPI llm.APIKind
 	partBCallCount := 0

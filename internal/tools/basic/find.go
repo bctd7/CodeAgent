@@ -15,6 +15,7 @@ import (
 
 	"CodeAgent/internal/agent"
 	"CodeAgent/internal/llm"
+	"CodeAgent/internal/tools/basic/common"
 )
 
 const (
@@ -43,8 +44,8 @@ var findSchema = []byte(`{
   "required": ["pattern"]
 }`)
 
-// NewFindTool 构造 find 工具实例。
-func NewFindTool(workingDir string) agent.Tool {
+// NewFind 构造 find 工具实例。
+func NewFind(workingDir string) agent.Tool {
 	return agent.Tool{
 		Tool: llm.Tool{
 			Name: findToolName,
@@ -120,7 +121,7 @@ func executeFind(ctx context.Context, workingDir string, args map[string]any) ([
 		return nil, fmt.Errorf("fd 未在 PATH 中找到，请安装 fd: %w", err)
 	}
 
-	searchPath, err := resolvePath(workingDir, pathStr)
+	searchPath, err := common.ResolvePath(workingDir, pathStr)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +175,7 @@ func executeFind(ctx context.Context, workingDir string, args map[string]any) ([
 		return nil, fmt.Errorf("创建 stdout 管道失败: %w", err)
 	}
 
-	stderrBuf := &limitedBuffer{max: 16 * 1024}
+	stderrBuf := &common.LimitedBuffer{Max: 16 * 1024}
 	cmd.Stderr = stderrBuf
 
 	if err := cmd.Start(); err != nil {
@@ -195,8 +196,8 @@ func executeFind(ctx context.Context, workingDir string, args map[string]any) ([
 			continue
 		}
 
-		rel := formatRelativePath(searchPath, rawLine)
-		escaped := escapeControlChars(rel)
+		rel := common.FormatRelativePath(searchPath, rawLine)
+		escaped := common.EscapeControlChars(rel)
 
 		lineBytes := len(escaped)
 		//换行符
@@ -204,7 +205,7 @@ func executeFind(ctx context.Context, workingDir string, args map[string]any) ([
 			lineBytes++
 		}
 
-		if totalBytesCount+lineBytes > DefaultMaxBytes {
+		if totalBytesCount+lineBytes > common.DefaultMaxBytes {
 			bytesLimitHit = true
 			// 达到字节预算后终止子进程
 			if cmd.Process != nil {
@@ -259,7 +260,7 @@ func executeFind(ctx context.Context, workingDir string, args map[string]any) ([
 		notices = append(notices, fmt.Sprintf("%d results limit reached. Use limit=%d for more, or refine pattern", effectiveLimit, effectiveLimit*2))
 	}
 	if bytesLimitHit {
-		notices = append(notices, fmt.Sprintf("%s limit reached", FormatSize(DefaultMaxBytes)))
+		notices = append(notices, fmt.Sprintf("%s limit reached", common.FormatSize(common.DefaultMaxBytes)))
 	}
 	if len(notices) > 0 {
 		resultOutput += "\n\n[" + strings.Join(notices, ". ") + "]"

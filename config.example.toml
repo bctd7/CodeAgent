@@ -1,3 +1,7 @@
+# 各级目录中查找的单个指令文件名；空值使用 AGENTS.md。
+[instructions]
+file_name = "AGENTS.md"
+
 [providers.gateway]
 base_url = "https://example.com/v1"
 api_key = "填写实际凭据"
@@ -22,3 +26,25 @@ max_tokens = 8192
 [providers.gateway.models.claude.anthropic]
 thinking = "adaptive"
 effort = "high"
+
+# MCP entries are disabled unless explicitly enabled. Loading this file never starts them.
+# transport is either stdio (direct executable, never a shell command string) or http.
+[mcp.local_example]
+enabled = false
+transport = "stdio"
+command = "configured-mcp-server"
+args = ["--stdio"]
+connect_timeout_ms = 10000
+request_timeout_ms = 30000
+# env omitted inherits the environment; env=[] is a complete empty replacement.
+# dir and terminate_duration_ms are optional (zero uses the SDK default).
+
+[mcp.http_example]
+enabled = false
+transport = "http"
+endpoint = "http://127.0.0.1:8080/mcp"
+connect_timeout_ms = 10000
+request_timeout_ms = 30000
+# Optional static headers; values must not override protocol-owned headers.
+[mcp.http_example.headers]
+X-Client = "CodeAgent"

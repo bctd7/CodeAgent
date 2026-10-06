@@ -9,6 +9,7 @@ import (
 
 	"CodeAgent/internal/agent"
 	"CodeAgent/internal/llm"
+	"CodeAgent/internal/tools/basic/common"
 )
 
 //已检查
@@ -28,8 +29,8 @@ var writeSchema = []byte(`{
   "required": ["path", "content"]
 }`)
 
-// NewWriteTool 构造 write 工具实例。
-func NewWriteTool(workingDir string) agent.Tool {
+// NewWrite 构造 write 工具实例。
+func NewWrite(workingDir string) agent.Tool {
 	return agent.Tool{
 		Tool: llm.Tool{
 			Name: "write",
@@ -60,7 +61,7 @@ func executeWrite(ctx context.Context, workingDir string, args map[string]any) (
 		return nil, fmt.Errorf("参数 'content' 必须为字符串")
 	}
 
-	target, err := resolvePath(workingDir, pathStr)
+	target, err := common.ResolvePath(workingDir, pathStr)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +101,7 @@ func executeWrite(ctx context.Context, workingDir string, args map[string]any) (
 	return []llm.ContentBlock{
 		{
 			Type: llm.TypeText,
-			Text: fmt.Sprintf("已写入 %s (%d 字节)", escapeControlChars(target), len(content)),
+			Text: fmt.Sprintf("已写入 %s (%d 字节)", common.EscapeControlChars(target), len(content)),
 		},
 	}, nil
 }

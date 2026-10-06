@@ -1,4 +1,4 @@
-// Package config 定义 Session 的共享记录、查询参数和状态，不负责读取配置文件。
+// config 包定义 Session 的共享记录、查询参数和状态，不负责读取配置文件。
 package config
 
 import (
@@ -109,25 +109,28 @@ type Entry struct {
 	// assistant 必须记录实际请求来源；用户消息与工具结果不重复填写。
 	Origin *MessageModelOrigin `json:"origin,omitempty"`
 
-	// 仅工具结果使用，与对应 assistant entry 和 tool call 关联。
+	// 仅工具结果使用，与对应的 assistant 记录和工具调用关联。
 	AssistantEntryID string `json:"assistant_entry_id,omitempty"`
 	ToolCallID       string `json:"tool_call_id,omitempty"`
 }
 
 // ToolExecution 记录工具的执行事实，不是完整运行事件流。
 // (AssistantEntryID, ToolCallID) 唯一定位一次调用；不能假设 ToolCallID 全局唯一。
-// 工具名和参数取自所属 assistant，最终内容及 IsError 取自 ResultEntryID，不重复存储。
+// 工具名取自所属 assistant；Arguments 保存最终参数，旧记录为 nil 时取原参数。
+// 最终内容及 IsError 取自 ResultEntryID。
 // 启动记录先提交，再调用工具；因此它不证明副作用已经发生。
 // 完成时结果记录与 FinishedAt/ResultEntryID 应在同一事务内提交。
 // 有启动记录而无结果时只能判定结果不明，不能自动重试。
 type ToolExecution struct {
-	SessionID        string     `json:"session_id"`
-	RunID            string     `json:"run_id"`
-	AssistantEntryID string     `json:"assistant_entry_id"`
-	ToolCallID       string     `json:"tool_call_id"`
-	StartedAt        time.Time  `json:"started_at"`
-	FinishedAt       *time.Time `json:"finished_at,omitempty"`
-	ResultEntryID    string     `json:"result_entry_id,omitempty"`
+	// nil 表示旧记录，此时使用原始 assistant 消息中的参数。
+	Arguments        *map[string]any `json:"arguments,omitempty"`
+	SessionID        string          `json:"session_id"`
+	RunID            string          `json:"run_id"`
+	AssistantEntryID string          `json:"assistant_entry_id"`
+	ToolCallID       string          `json:"tool_call_id"`
+	StartedAt        time.Time       `json:"started_at"`
+	FinishedAt       *time.Time      `json:"finished_at,omitempty"`
+	ResultEntryID    string          `json:"result_entry_id,omitempty"`
 }
 
 // MessageModelOrigin 是产生响应时的请求来源，用于恢复后的思考块同源检查。

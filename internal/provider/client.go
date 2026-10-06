@@ -7,19 +7,19 @@ import (
 
 	"CodeAgent/internal/llm"
 	"CodeAgent/internal/provider/anthropic"
-	"CodeAgent/internal/provider/openai"
+	"CodeAgent/internal/provider/openai/chat"
 )
 
 // Client 统一调度各协议的适配器。
 type Client struct {
-	openaiClient    *openai.Client
+	openaiClient    *chat.Client
 	anthropicClient *anthropic.Client
 }
 
 // NewClient 构造统一调度客户端，允许注入自定义 *http.Client。
 func NewClient(httpClient *http.Client) *Client {
 	return &Client{
-		openaiClient:    openai.NewClient(httpClient),
+		openaiClient:    chat.NewClient(httpClient),
 		anthropicClient: anthropic.NewClient(httpClient),
 	}
 }

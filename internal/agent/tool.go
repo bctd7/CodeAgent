@@ -223,6 +223,9 @@ func (s *toolScheduler) executeToolCall(item toolCallItem) {
 			blocks = []llm.ContentBlock{{Type: llm.TypeText, Text: decision.Reason}}
 			isError, skipped = true, true
 		} else {
+			if decision.ToolArguments != nil {
+				call.Arguments = *decision.ToolArguments
+			}
 			s.agent.dispatcher.emit(Event{
 				Kind:       EventToolStart,
 				RunID:      s.run.id,
@@ -352,7 +355,16 @@ func (s *toolScheduler) fillSkippedResults() {
 func (s *toolScheduler) saveResult(result *llm.ToolResultMessage) {
 	_, decision := s.agent.handoff(s.run, Checkpoint{Kind: ToolFinished, StepIndex: s.stepIndex, ResponseID: s.responseID, ToolResult: result}, nil)
 	if decision.Kind == Stop {
+		// 加工失败后不得向模型暴露原始输出，后续任务也须遵守此规则。
+		result.Content = []llm.ContentBlock{}
 		s.recordStop("因执行故障而未执行")
+		return
+	}
+	if decision.ToolContent != nil {
+		result.Content = *decision.ToolContent
+		if result.Content == nil {
+			result.Content = []llm.ContentBlock{}
+		}
 	}
 }
 

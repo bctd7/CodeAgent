@@ -20,6 +20,7 @@ type activeRun struct {
 	usage      map[string]llm.Usage
 	totalUsage llm.Usage
 	finishing  bool
+	err        error // 本轮执行错误，不影响后续任务准入
 }
 
 // runLoop 后台工作主循环，作为关闭收尾的唯一负责人。
@@ -136,6 +137,10 @@ func (a *Agent) executeRun(run *activeRun) {
 			return
 		}
 		a.mu.Lock()
+		if decision.RequestContext != nil {
+			req.SystemPrompt = decision.RequestContext.SystemPrompt
+			req.Messages = decision.RequestContext.Messages
+		}
 		run.steps++
 		if !a.canStartWorkLocked(run) {
 			a.finishRunAndUnlock(run, RunResult{}, nil)
@@ -319,6 +324,11 @@ func (a *Agent) finishRunAndUnlock(run *activeRun, result RunResult, stepEnd *Ev
 		}
 	}
 
+	if run.err != nil {
+		result.State = RunStateError
+		result.StopReason, result.RawStopReason = "", ""
+		result.ErrorMessage, result.Error = run.err.Error(), run.err
+	}
 	if a.executionErr != nil {
 		result.State = RunStateError
 		result.StopReason, result.RawStopReason = "", ""
@@ -333,8 +343,8 @@ func (a *Agent) finishRunAndUnlock(run *activeRun, result RunResult, stepEnd *Ev
 		result.State = RunStateError
 		result.StopReason = ""
 		result.RawStopReason = ""
-		result.ErrorMessage = a.executionErr.Error()
-		result.Error = a.executionErr
+		result.ErrorMessage = decision.Error.Error()
+		result.Error = decision.Error
 	}
 	// 成功或单任务取消后保留排队任务；失败或截断则丢弃。
 	truncated := result.State == RunStateSuccess && result.StopReason == RunStopTruncated

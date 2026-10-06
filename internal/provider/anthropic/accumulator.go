@@ -30,8 +30,8 @@ type responseAccumulator struct {
 	writer              llm.StreamWriter
 	pricing             llm.Pricing
 	message             llm.AssistantMessage
-	blockMap            map[int]int                  // Anthropic index -> message.Content index
-	tools               map[int]*toolCallAccumulator // Anthropic index -> toolCallAccumulator
+	blockMap            map[int]int                  // Anthropic 内容块序号与 message.Content 下标的映射
+	tools               map[int]*toolCallAccumulator // 按 Anthropic 内容块序号保存工具调用累积状态
 	receivedMessageStop bool
 }
 

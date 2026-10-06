@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS tool_executions (
     run_id TEXT NOT NULL REFERENCES runs(id),
     assistant_entry_id TEXT NOT NULL REFERENCES entries(id),
     tool_call_id TEXT NOT NULL,
+    arguments_json TEXT,
     started_at TEXT NOT NULL,
     finished_at TEXT,
     result_entry_id TEXT REFERENCES entries(id),
@@ -66,3 +67,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS entries_assistant_tool_call ON entries(assista
 const SetUserVersionV2SQL = `PRAGMA user_version = 2`
 
 const SetUserVersionV3SQL = `PRAGMA user_version = 3`
+
+const SetUserVersionV4SQL = `PRAGMA user_version = 4`

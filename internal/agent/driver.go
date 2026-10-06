@@ -22,7 +22,8 @@ const (
 	RunFinishing       CheckpointKind = "run_finishing"
 )
 
-// Checkpoint 的内容由驱动者保持只读。ResponseID 关联执行节点，不是数据库 ID。
+// Checkpoint 的内容及其嵌套切片、map 和消息由驱动者递归只读。
+// ResponseID 关联执行节点，不是数据库 ID。
 type Checkpoint struct {
 	ID          CheckpointID
 	Kind        CheckpointKind
@@ -47,11 +48,23 @@ const (
 	Stop     DecisionKind = "stop"
 )
 
-// Stop 是通用执行故障；存储故障分类及超时由驱动者处理。
+// RequestContext 只承载本次请求可替换的系统提示词和消息，不提供复制或隔离。
+type RequestContext struct {
+	SystemPrompt string
+	Messages     []llm.Message
+}
+
+// Stop 终止本轮；持久故障由驱动者另行调用 StopExecution 关闭准入。
+// 替换数据在 Resolve 成功交接后不得再由返回者修改。
+// 替换值与输入共享的未修改嵌套数据仍须只读；交接不做深复制。
 type Decision struct {
 	Kind   DecisionKind
 	Reason string
 	Error  error
+	// 载荷只能替换对应数据，且仅 Continue 决策允许携带。
+	RequestContext *RequestContext
+	ToolArguments  *map[string]any
+	ToolContent    *[]llm.ContentBlock
 }
 
 var (
@@ -140,6 +153,9 @@ func (d *Driver) Resolve(ctx context.Context, id CheckpointID, decision Decision
 	valid := decision.Kind == Continue && decision.Error == nil && decision.Reason == "" ||
 		decision.Kind == Skip && p.checkpoint.Kind == ToolStarting && decision.Reason != "" && decision.Error == nil ||
 		decision.Kind == Stop && decision.Error != nil
+	valid = valid && (decision.RequestContext == nil || decision.Kind == Continue && p.checkpoint.Kind == ModelRequestReady) &&
+		(decision.ToolArguments == nil || decision.Kind == Continue && p.checkpoint.Kind == ToolStarting) &&
+		(decision.ToolContent == nil || decision.Kind == Continue && p.checkpoint.Kind == ToolFinished)
 	if !valid {
 		a.mu.Unlock()
 		return ErrDecision
@@ -149,7 +165,12 @@ func (d *Driver) Resolve(ctx context.Context, id CheckpointID, decision Decision
 		return err
 	}
 	if decision.Kind == Stop {
-		a.stopLocked(decision.Error)
+		// 只有 StopExecution 会登记永久执行故障。
+		// 已接受的取消也优先于随后返回的业务错误。
+		if a.currentRun.err == nil && a.currentRun.ctx.Err() == nil {
+			a.currentRun.err = decision.Error
+		}
+		a.currentRun.cancel()
 	}
 	if p.checkpoint.Kind == ToolStarting && decision.Kind == Continue {
 		if reason := p.scheduler.startPermissionLocked(); reason != "" {

@@ -14,9 +14,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// RecordToolStart 记录一次工具调用的启动事实。
+// RecordToolStart 记录一次工具调用的启动事实，arguments 必须是最终执行参数。
+// 调用期间借用只读参数；返回记录共享该参数 map，调用方不得修改。
 // 按 AssistantEntryID + ToolCallID 定位，验证归属与未结束状态，检查防止重复启动或重复结果。
-func (s *Session) RecordToolStart(ctx context.Context, assistantEntryID, toolCallID string) (config.ToolExecution, error) {
+func (s *Session) RecordToolStart(ctx context.Context, assistantEntryID, toolCallID string, arguments map[string]any) (config.ToolExecution, error) {
 	if assistantEntryID == "" {
 		return config.ToolExecution{}, fmt.Errorf("assistantEntryID 不能为空")
 	}
@@ -75,6 +76,7 @@ func (s *Session) RecordToolStart(ctx context.Context, assistantEntryID, toolCal
 			RunID:            runID,
 			AssistantEntryID: assistantEntryID,
 			ToolCallID:       toolCallID,
+			Arguments:        &arguments,
 			StartedAt:        now,
 			FinishedAt:       nil,
 			ResultEntryID:    "",
@@ -90,6 +92,7 @@ func (s *Session) RecordToolStart(ctx context.Context, assistantEntryID, toolCal
 }
 
 // AppendToolResult 追加工具执行结果消息。
+// 调用期间借用只读消息；返回 Entry 共享该消息，调用方不得修改。
 // 验证调用配对、会话和 Run 归属及未结束状态，禁止重复结果。
 func (s *Session) AppendToolResult(ctx context.Context, assistantEntryID string, resultMsg *llm.ToolResultMessage) (config.Entry, error) {
 	if assistantEntryID == "" {

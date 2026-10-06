@@ -25,7 +25,7 @@ func initEmptyDatabase(ctx context.Context, tx *sql.Tx, version int) error {
 		return fmt.Errorf("执行创建索引语句: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, sessql.SetUserVersionV3SQL); err != nil {
+	if _, err := tx.ExecContext(ctx, sessql.SetUserVersionV4SQL); err != nil {
 		return fmt.Errorf("设置数据库版本号: %w", err)
 	}
 
@@ -189,11 +189,24 @@ func migrateDatabase(ctx context.Context, tx *sql.Tx, version int, existingTable
 		if err := ensureSchemaConstraints(ctx, tx); err != nil {
 			return err
 		}
-		if version == 3 {
+		if version >= 3 {
 			if _, ok := sessionsCols["model_selection_json"]; !ok {
 				return fmt.Errorf("版本 3 缺少模型选择列")
 			}
-			return nil
+			if version == 4 {
+				if _, ok := toolExecCols["arguments_json"]; !ok {
+					return fmt.Errorf("version 4 missing tool arguments column")
+				}
+				return nil
+			}
+			if _, ok := toolExecCols["arguments_json"]; ok {
+				return fmt.Errorf("legacy schema contains unexpected tool arguments column")
+			}
+			if _, err := tx.ExecContext(ctx, sessql.AddToolArgumentsSQL); err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, sessql.SetUserVersionV4SQL)
+			return err
 		}
 		if _, ok := sessionsCols["model_selection_json"]; ok {
 			return fmt.Errorf("旧版本含未识别的模型选择列")
@@ -201,7 +214,10 @@ func migrateDatabase(ctx context.Context, tx *sql.Tx, version int, existingTable
 		if _, err := tx.ExecContext(ctx, sessql.AddModelSelectionSQL); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, sessql.SetUserVersionV3SQL)
+		if _, err := tx.ExecContext(ctx, sessql.AddToolArgumentsSQL); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, sessql.SetUserVersionV4SQL)
 		return err
 	}
 
@@ -387,7 +403,10 @@ func migrateDatabase(ctx context.Context, tx *sql.Tx, version int, existingTable
 		return err
 	}
 	// 更新版本号
-	if _, err := tx.ExecContext(ctx, sessql.SetUserVersionV3SQL); err != nil {
+	if _, err := tx.ExecContext(ctx, sessql.AddToolArgumentsSQL); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, sessql.SetUserVersionV4SQL); err != nil {
 		return fmt.Errorf("更新数据库版本号失败: %w", err)
 	}
 

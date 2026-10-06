@@ -29,7 +29,7 @@ func abortOrFail(writer llm.StreamWriter, msg llm.AssistantMessage, err error) {
 // parseHTTPError 读取最多 64 KiB 的 HTTP 错误响应体，优先提取服务端错误消息。
 // 不输出请求头、凭据或完整请求体。
 func parseHTTPError(resp *http.Response) error {
-	const maxErrBodySize = 64 << 10 // 64 KiB
+	const maxErrBodySize = 64 << 10 // 错误响应体上限为 64 KiB
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrBodySize))
 	if err != nil {
 		return fmt.Errorf("HTTP %d (读取响应体失败: %w)", resp.StatusCode, err)

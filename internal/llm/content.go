@@ -15,21 +15,21 @@ const (
 type ContentBlock struct {
 	Type ContentType
 
-	// text
+	// 文本
 	Text          string
 	TextSignature string // 签名
 
-	// thinking
+	// 思考内容
 	Thinking          string
 	ThinkingSignature string
 	Redacted          bool   // 是否被 Provider 隐去
-	RedactedData      string // redacted thinking 的不透明数据，不与图片 Data 混用
+	RedactedData      string // 脱敏思考内容的不透明数据，不与图片 Data 混用
 
-	// image
+	// 图片
 	Data     string // base64 编码的图片数据
 	MimeType string
 
-	// toolCall
+	// 工具调用
 	ID               string
 	Name             string
 	Arguments        map[string]any // 工具参数

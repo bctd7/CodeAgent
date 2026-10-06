@@ -14,7 +14,7 @@ import (
 )
 
 // CurrentSchemaVersion 是当前支持的表结构和消息格式版本。
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 // Store 负责底层数据库连接生命周期、配置以及提供可复用的事务执行能力。
 type Store struct {

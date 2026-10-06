@@ -12,6 +12,7 @@ import (
 
 	"CodeAgent/internal/agent"
 	"CodeAgent/internal/llm"
+	"CodeAgent/internal/tools/basic/common"
 )
 
 const (
@@ -33,8 +34,8 @@ var lsSchema = []byte(`{
   }
 }`)
 
-// NewLsTool 构造 ls 工具实例。
-func NewLsTool(workingDir string) agent.Tool {
+// NewLS 构造 ls 工具实例。
+func NewLS(workingDir string) agent.Tool {
 	return agent.Tool{
 		Tool: llm.Tool{
 			Name: lsToolName,
@@ -95,7 +96,7 @@ func executeLs(ctx context.Context, workingDir string, args map[string]any) ([]l
 		return nil, err
 	}
 
-	searchPath, err := resolvePath(workingDir, pathStr)
+	searchPath, err := common.ResolvePath(workingDir, pathStr)
 	if err != nil {
 		return nil, err
 	}
@@ -153,14 +154,14 @@ func executeLs(ctx context.Context, workingDir string, args map[string]any) ([]l
 		if targetStat.IsDir() {
 			suffix = "/"
 		}
-		line := escapeControlChars(entry.Name()) + suffix
+		line := common.EscapeControlChars(entry.Name()) + suffix
 
 		lineBytes := len(line)
 		if len(results) > 0 {
 			lineBytes++
 		}
 
-		if totalBytesCount+lineBytes > DefaultMaxBytes {
+		if totalBytesCount+lineBytes > common.DefaultMaxBytes {
 			bytesLimitHit = true
 			break
 		}
@@ -185,7 +186,7 @@ func executeLs(ctx context.Context, workingDir string, args map[string]any) ([]l
 		notices = append(notices, fmt.Sprintf("%d entries limit reached. Use limit=%d for more", effectiveLimit, effectiveLimit*2))
 	}
 	if bytesLimitHit {
-		notices = append(notices, fmt.Sprintf("%s limit reached", FormatSize(DefaultMaxBytes)))
+		notices = append(notices, fmt.Sprintf("%s limit reached", common.FormatSize(common.DefaultMaxBytes)))
 	}
 	if len(notices) > 0 {
 		resultOutput += "\n\n[" + strings.Join(notices, ". ") + "]"

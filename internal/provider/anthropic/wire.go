@@ -28,25 +28,25 @@ type messageWire struct {
 type contentBlockWire struct {
 	Type string `json:"type"`
 
-	// text
+	// 文本
 	Text *string `json:"text,omitempty"`
 
-	// image
+	// 图片
 	Source *imageSourceWire `json:"source,omitempty"`
 
-	// thinking
+	// 思考内容
 	Thinking  *string `json:"thinking,omitempty"`
 	Signature string  `json:"signature,omitempty"`
 
-	// redacted_thinking
+	// 脱敏思考内容（redacted_thinking）
 	Data string `json:"data,omitempty"`
 
-	// tool_use
+	// 工具调用（tool_use）
 	ID    string          `json:"id,omitempty"`
 	Name  string          `json:"name,omitempty"`
 	Input *map[string]any `json:"input,omitempty"`
 
-	// tool_result
+	// 工具结果（tool_result）
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
 	Content   any    `json:"content,omitempty"` // string 或 []contentBlockWire
@@ -54,8 +54,8 @@ type contentBlockWire struct {
 
 // imageSourceWire 是 Anthropic 图片块中的 base64 源描述。
 type imageSourceWire struct {
-	Type      string `json:"type"`       // "base64"
-	MediaType string `json:"media_type"` // e.g. "image/jpeg", "image/png"
+	Type      string `json:"type"`       // 图片源类型固定为 "base64"
+	MediaType string `json:"media_type"` // 图片媒体类型，例如 "image/jpeg" 或 "image/png"
 	Data      string `json:"data"`       // base64 编码的图片数据
 }
 

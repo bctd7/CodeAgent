@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -56,11 +57,52 @@ func (r *Runtime) drive() {
 				return
 			}
 			c = next
-			if c.Kind == agent.ToolStarting {
+			if c.Kind == agent.ModelRequestReady || c.Kind == agent.ModelResponseReady || c.Kind == agent.ToolStarting || c.Kind == agent.ToolFinished {
 				hooksRunning.Add(1)
 				go func(c agent.Checkpoint) {
 					defer hooksRunning.Done()
-					ready <- hookResult{c, r.beforeTool(c)}
+					hookCtx, cancel := context.WithTimeout(c.Context, r.host.config.RecordTimeout)
+					defer cancel()
+					decision := agent.Decision{Kind: agent.Continue}
+					switch c.Kind {
+					case agent.ModelRequestReady:
+						replacement, err := r.host.config.Hooks.BeforeModelRequest(hookCtx, hooks.ModelRequest{
+							SessionID: r.SessionID(), RunID: c.RunID, StepIndex: c.StepIndex,
+							Context: llm.RequestContext{SystemPrompt: c.Request.SystemPrompt, Messages: c.Request.Messages},
+						})
+						if err != nil {
+							decision = agent.Decision{Kind: agent.Stop, Error: fmt.Errorf("before model request: %w", err)}
+						} else {
+							decision.RequestContext = replacement
+						}
+					case agent.ModelResponseReady:
+						r.host.config.Hooks.AfterModelResponse(hookCtx, hooks.ModelResponse{SessionID: r.SessionID(), RunID: c.RunID, StepIndex: c.StepIndex, Response: *c.Response})
+					case agent.ToolStarting:
+						result := r.host.config.Hooks.BeforeTool(hookCtx, hooks.ToolRequest{SessionID: r.SessionID(), RunID: c.RunID, StepIndex: c.StepIndex, Call: *c.ToolCall})
+						switch {
+						case c.Context.Err() != nil:
+							decision = agent.Decision{Kind: agent.Skip, Reason: "cancelled before tool execution"}
+						case hookCtx.Err() != nil:
+							decision = agent.Decision{Kind: agent.Skip, Reason: fmt.Sprintf("before tool: %v", hookCtx.Err())}
+						case result.Reason != "":
+							decision = agent.Decision{Kind: agent.Skip, Reason: result.Reason}
+						default:
+							decision.ToolArguments = result.Arguments
+						}
+					case agent.ToolFinished:
+						content, err := r.host.config.Hooks.AfterTool(hookCtx, hooks.ToolResponse{SessionID: r.SessionID(), RunID: c.RunID, StepIndex: c.StepIndex, Result: *c.ToolResult})
+						if err != nil {
+							decision = agent.Decision{Kind: agent.Stop, Error: fmt.Errorf("after tool: %w", err)}
+							// 保留原始输出供审计，加工失败后不得将其重新提供给模型。
+							empty := []llm.ContentBlock{}
+							copy := *c.ToolResult
+							copy.ModelContent = &empty
+							c.ToolResult = &copy
+						} else if content != nil && !reflect.DeepEqual(*content, c.ToolResult.Content) {
+							decision.ToolContent = content
+						}
+					}
+					ready <- hookResult{c, decision}
 				}(c)
 				continue
 			}
@@ -72,9 +114,12 @@ func (r *Runtime) drive() {
 			record = &runRecords{responses: make(map[agent.CheckpointID]string)}
 			records[c.RunID] = record
 		}
-		// Hook 只决定工具许可；关联映射及数据库操作仍由此处串行处理。
-		if decision.Kind == "" || decision.Kind == agent.Continue {
-			decision = r.coordinate(c, record)
+		// Hook 转换结果交回这里串行保存；不让回调持有记录映射或存储连接。
+		if decision.Kind == "" {
+			decision.Kind = agent.Continue
+		}
+		if decision.Kind == agent.Continue || c.Kind == agent.ToolFinished {
+			decision = r.coordinate(c, record, decision)
 		}
 		if err := r.driver.Resolve(context.Background(), c.ID, decision); err != nil {
 			r.persistenceFault(err)
@@ -85,26 +130,9 @@ func (r *Runtime) drive() {
 	}
 }
 
-func (r *Runtime) beforeTool(c agent.Checkpoint) agent.Decision {
-	hookCtx, cancel := context.WithTimeout(c.Context, r.manager.config.RecordTimeout)
-	decision := r.manager.config.Hooks.BeforeTool(hookCtx, hooks.ToolRequest{SessionID: r.SessionID(), RunID: c.RunID, StepIndex: c.StepIndex, Call: *c.ToolCall})
-	hookErr := hookCtx.Err()
-	cancel()
-	if c.Context.Err() != nil {
-		return agent.Decision{Kind: agent.Skip, Reason: "因取消而未执行"}
-	}
-	if hookErr != nil {
-		return agent.Decision{Kind: agent.Skip, Reason: fmt.Sprintf("工具 Hook 未完成: %v", hookErr)}
-	}
-	if decision.Reason != "" {
-		return agent.Decision{Kind: agent.Skip, Reason: decision.Reason}
-	}
-	return agent.Decision{Kind: agent.Continue}
-}
-
-// 每个保存节点使用独立、有界 context。故障后仍尝试保存在途结果及终态。
-func (r *Runtime) coordinate(c agent.Checkpoint, record *runRecords) agent.Decision {
-	ctx, cancel := context.WithTimeout(context.Background(), r.manager.config.RecordTimeout)
+func (r *Runtime) coordinate(c agent.Checkpoint, record *runRecords, decision agent.Decision) agent.Decision {
+	// 取消或 Hook 失败后仍须完成事实记录。
+	ctx, cancel := context.WithTimeout(context.Background(), r.host.config.RecordTimeout)
 	defer cancel()
 	var err error
 	switch c.Kind {
@@ -131,14 +159,18 @@ func (r *Runtime) coordinate(c agent.Checkpoint, record *runRecords) agent.Decis
 		if assistantID == "" {
 			err = fmt.Errorf("工具启动缺少已保存的 assistant 关联")
 		} else {
-			_, err = r.session.RecordToolStart(ctx, assistantID, c.ToolCall.ID)
+			_, err = r.session.RecordToolStart(ctx, assistantID, c.ToolCall.ID, decision.ToolArguments)
 		}
 	case agent.ToolFinished:
 		assistantID := record.responses[c.ResponseID]
 		if assistantID == "" {
 			err = fmt.Errorf("工具结果缺少已保存的 assistant 关联")
 		} else {
-			_, err = r.session.AppendToolResult(ctx, assistantID, c.ToolResult)
+			result := *c.ToolResult
+			if decision.ToolContent != nil {
+				result.ModelContent = decision.ToolContent
+			}
+			_, err = r.session.AppendToolResult(ctx, assistantID, &result)
 		}
 	case agent.RunFinishing:
 		if record.started {
@@ -151,8 +183,8 @@ func (r *Runtime) coordinate(c agent.Checkpoint, record *runRecords) agent.Decis
 			}
 			_, err = r.session.FinishRun(ctx, c.RunID, sessionconfig.RunCompletion{State: sessionconfig.RunState(result.State), StopReason: llm.StopReason(result.StopReason), RawStopReason: result.RawStopReason, ErrorMessage: result.ErrorMessage})
 			if err == nil && result.State == agent.RunStateSuccess && result.StopReason == agent.RunStopCompleted {
-				hookCtx, stopHook := context.WithTimeout(context.Background(), r.manager.config.RecordTimeout)
-				r.manager.config.Hooks.Completed(hookCtx, hooks.Completion{SessionID: r.SessionID(), Result: result})
+				hookCtx, stopHook := context.WithTimeout(context.Background(), r.host.config.RecordTimeout)
+				r.host.config.Hooks.Completed(hookCtx, hooks.Completion{SessionID: r.SessionID(), Result: result})
 				stopHook()
 			}
 			if err == nil && fault != nil {
@@ -166,7 +198,7 @@ func (r *Runtime) coordinate(c agent.Checkpoint, record *runRecords) agent.Decis
 		r.persistenceFault(err)
 		return agent.Decision{Kind: agent.Stop, Error: r.firstFault()}
 	}
-	return agent.Decision{Kind: agent.Continue}
+	return decision
 }
 
 func (r *Runtime) fillTitle(ctx context.Context, msg *llm.UserMessage) {
@@ -178,7 +210,7 @@ func (r *Runtime) fillTitle(ctx context.Context, msg *llm.UserMessage) {
 		if len(title) > 80 {
 			title = title[:80]
 		}
-		_, _ = r.manager.service.SetTitleIfEmpty(ctx, r.SessionID(), string(title))
+		_, _ = r.host.service.SetTitleIfEmpty(ctx, r.SessionID(), string(title))
 		return
 	}
 }

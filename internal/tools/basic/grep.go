@@ -17,6 +17,7 @@ import (
 
 	"CodeAgent/internal/agent"
 	"CodeAgent/internal/llm"
+	"CodeAgent/internal/tools/basic/common"
 )
 
 const (
@@ -74,8 +75,8 @@ type rgMatchEvent struct {
 	} `json:"data"`
 }
 
-// NewGrepTool 构造 grep 工具实例。
-func NewGrepTool(workingDir string) agent.Tool {
+// NewGrep 构造 grep 工具实例。
+func NewGrep(workingDir string) agent.Tool {
 	return agent.Tool{
 		Tool: llm.Tool{
 			Name: grepToolName,
@@ -211,7 +212,7 @@ func executeGrep(ctx context.Context, workingDir string, args map[string]any) ([
 		return nil, fmt.Errorf("ripgrep (rg) 未在 PATH 中找到，请安装 ripgrep: %w", err)
 	}
 
-	searchPath, err := resolvePath(workingDir, pathStr)
+	searchPath, err := common.ResolvePath(workingDir, pathStr)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +244,7 @@ func executeGrep(ctx context.Context, workingDir string, args map[string]any) ([
 		return nil, fmt.Errorf("创建 stdout 管道失败: %w", err)
 	}
 
-	stderrBuf := &limitedBuffer{max: 16 * 1024}
+	stderrBuf := &common.LimitedBuffer{Max: 16 * 1024}
 	cmd.Stderr = stderrBuf
 
 	if err := cmd.Start(); err != nil {
@@ -338,14 +339,14 @@ func executeGrep(ctx context.Context, workingDir string, args map[string]any) ([
 		}
 
 		// 格式化输出行与转义
-		relPath := formatRelativePath(searchPath, pathText)
+		relPath := common.FormatRelativePath(searchPath, pathText)
 		if !isDirectory {
 			relPath = filepath.Base(pathText)
 		}
-		relPath = escapeControlChars(relPath)
+		relPath = common.EscapeControlChars(relPath)
 
 		sanitized := strings.TrimRight(lineText, "\r\n")
-		truncatedText, wasTrunc := TruncateLine(sanitized, GrepMaxLineLength)
+		truncatedText, wasTrunc := truncateLine(sanitized, grepMaxLineLength)
 		if wasTrunc {
 			linesTruncated = true
 		}
@@ -363,7 +364,7 @@ func executeGrep(ctx context.Context, workingDir string, args map[string]any) ([
 		}
 
 		// 严格控制 50 KiB 输出预算
-		if totalBytesCount+lineBytes > DefaultMaxBytes {
+		if totalBytesCount+lineBytes > common.DefaultMaxBytes {
 			bytesLimitHit = true
 			break
 		}
@@ -434,10 +435,10 @@ func executeGrep(ctx context.Context, workingDir string, args map[string]any) ([
 		notices = append(notices, fmt.Sprintf("%d matches limit reached. Use limit=%d for more, or refine pattern", effectiveLimit, effectiveLimit*2))
 	}
 	if bytesLimitHit {
-		notices = append(notices, fmt.Sprintf("%s limit reached", FormatSize(DefaultMaxBytes)))
+		notices = append(notices, fmt.Sprintf("%s limit reached", common.FormatSize(common.DefaultMaxBytes)))
 	}
 	if linesTruncated {
-		notices = append(notices, fmt.Sprintf("Some lines truncated to %d chars. Use read tool to see full lines", GrepMaxLineLength))
+		notices = append(notices, fmt.Sprintf("Some lines truncated to %d chars. Use read tool to see full lines", grepMaxLineLength))
 	}
 	if len(notices) > 0 {
 		resultOutput += "\n\n[" + strings.Join(notices, ". ") + "]"
@@ -449,4 +450,19 @@ func executeGrep(ctx context.Context, workingDir string, args map[string]any) ([
 			Text: resultOutput,
 		},
 	}, nil
+}
+
+// grepMaxLineLength 是 grep 匹配单行的最大 Unicode 字符数。
+const grepMaxLineLength = 500
+
+// truncateLine 对单行文本进行长度缩短，超过 maxChars (Unicode 字符数) 时添加 "... [truncated]" 后缀。
+func truncateLine(line string, maxChars int) (string, bool) {
+	if maxChars <= 0 {
+		maxChars = grepMaxLineLength
+	}
+	runes := []rune(line)
+	if len(runes) <= maxChars {
+		return line, false
+	}
+	return string(runes[:maxChars]) + "... [truncated]", true
 }

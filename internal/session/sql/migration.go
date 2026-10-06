@@ -41,13 +41,15 @@ const SelectUnassignedToolEntriesSQL = `SELECT id, session_id, run_id, message_j
 // SelectToolExecutionForMigrationSQL 根据 result_entry_id 查询执行事实。
 const SelectToolExecutionForMigrationSQL = `SELECT session_id, run_id, assistant_entry_id, tool_call_id FROM tool_executions WHERE result_entry_id = ? LIMIT 2`
 
-// SelectAssistantForMigrationSQL 检验指定 assistant entry 是否合法。
+// SelectAssistantForMigrationSQL 检验指定 assistant 记录是否合法。
 const SelectAssistantForMigrationSQL = `SELECT message_json FROM entries WHERE id = ? AND session_id = ? AND run_id = ?`
 
-// SelectCandidateAssistantsSQL 查询同 Run 内的所有候选 assistant entries。
+// SelectCandidateAssistantsSQL 查询同一 Run 内的所有候选 assistant 记录。
 const SelectCandidateAssistantsSQL = `SELECT id, message_json FROM entries WHERE session_id = ? AND run_id = ?`
 
 // UpdateBackfilledToolEntrySQL 回填 entries 记录的 assistant 关联字段。
 const UpdateBackfilledToolEntrySQL = `UPDATE entries SET assistant_entry_id = ?, tool_call_id = ? WHERE id = ?`
 
 const AddModelSelectionSQL = `ALTER TABLE sessions ADD COLUMN model_selection_json TEXT`
+
+const AddToolArgumentsSQL = `ALTER TABLE tool_executions ADD COLUMN arguments_json TEXT`

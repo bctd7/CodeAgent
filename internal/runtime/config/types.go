@@ -1,4 +1,4 @@
-// Package config 保存 Runtime 的装配参数，不读取配置文件。
+// config 包保存 Runtime 的装配参数，不读取配置文件。
 package config
 
 import (

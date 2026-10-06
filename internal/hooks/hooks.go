@@ -1,61 +1,137 @@
-// Package hooks 提供 Runtime 使用的小型业务扩展点，不负责持久化或执行调度。
+// hooks 包提供 Runtime 使用的小型业务扩展点，不负责持久化或执行调度。
 package hooks
 
 import (
 	"context"
 	"fmt"
 	"log"
-	"sync"
+	"maps"
 
-	"CodeAgent/internal/agent"
 	"CodeAgent/internal/llm"
 )
 
-// Hook 输入保持只读，不包含数据库连接、凭据或可变 Agent。
-type Completion struct {
-	SessionID string
-	Result    agent.RunResult
-}
-type ToolRequest struct {
-	SessionID, RunID string
-	StepIndex        int
-	Call             llm.ContentBlock
+// BeforeModelRequest 依次转换本次请求上下文，后续回调看到前序返回的替换。
+// 回调或复制失败时报告并返回错误，由 Runtime 停止本轮请求。
+func (r *Registry) BeforeModelRequest(ctx context.Context, request ModelRequest) (*llm.RequestContext, error) {
+	if r == nil {
+		return nil, nil
+	}
+	r.mu.Lock()
+	handlers := append([]BeforeModelRequestHook(nil), r.beforeModelRequest...)
+	r.mu.Unlock()
+	var final *llm.RequestContext
+	for _, handler := range handlers {
+		err := protected(func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			input := request
+			var err error
+			input.Context, err = request.Context.Clone()
+			if err != nil {
+				return err
+			}
+			next, err := handler(ctx, input)
+			if err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if next != nil {
+				copy, err := next.Clone()
+				if err != nil {
+					return err
+				}
+				request.Context, final = copy, &copy
+			}
+			return nil
+		})
+		if err != nil {
+			r.report(Failure{"before_model_request", request.SessionID, request.RunID, err})
+			return nil, err
+		}
+	}
+	return final, nil
 }
 
-// 空 Reason 允许执行；非空 Reason 拒绝并形成未执行工具结果。
-type ToolDecision struct{ Reason string }
-type CompletionHook func(context.Context, Completion) error
-type BeforeToolHook func(context.Context, ToolRequest) (ToolDecision, error)
-type Failure struct {
-	Point, SessionID, RunID string
-	Error                   error
-}
-
-// Registry 可在多个会话间共享；用户回调必须响应 ctx 且快速返回。
-// Hook 本身的共享状态由其实现同步，例如示例中的 atomic.Int64。
-type Registry struct {
-	mu         sync.Mutex
-	completed  []CompletionHook
-	beforeTool []BeforeToolHook
-	onError    func(Failure)
-}
-
-func New(onError func(Failure)) *Registry { return &Registry{onError: onError} }
-func (r *Registry) RegisterCompletion(fn CompletionHook) {
-	if fn == nil {
+// AfterModelResponse 只观察完整响应；各回调得到独立副本。
+// 观察错误仅报告，不改写响应。
+func (r *Registry) AfterModelResponse(ctx context.Context, response ModelResponse) {
+	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	r.completed = append(r.completed, fn)
+	handlers := append([]AfterModelResponseHook(nil), r.afterModelResponse...)
 	r.mu.Unlock()
+	for _, handler := range handlers {
+		err := protected(func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			copy, err := llm.CloneMessage(&response.Response)
+			if err != nil {
+				return err
+			}
+			input := response
+			input.Response = *copy.(*llm.AssistantMessage)
+			if err := handler(ctx, input); err != nil {
+				return err
+			}
+			return ctx.Err()
+		})
+		if err != nil {
+			r.report(Failure{"after_model_response", response.SessionID, response.RunID, err})
+		}
+	}
 }
-func (r *Registry) RegisterBeforeTool(fn BeforeToolHook) {
-	if fn == nil {
-		return
+
+// AfterTool 依次转换模型可见的工具结果内容，后续回调看到前序替换。
+// 转换失败时报告并返回错误，由 Runtime 保留原始结果、清空模型可见内容并结束本轮。
+func (r *Registry) AfterTool(ctx context.Context, response ToolResponse) (*[]llm.ContentBlock, error) {
+	if r == nil {
+		return nil, nil
 	}
 	r.mu.Lock()
-	r.beforeTool = append(r.beforeTool, fn)
+	handlers := append([]AfterToolHook(nil), r.afterTool...)
 	r.mu.Unlock()
+	var final *[]llm.ContentBlock
+	for _, handler := range handlers {
+		err := protected(func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			copy, err := llm.CloneMessage(&response.Result)
+			if err != nil {
+				return err
+			}
+			input := response
+			input.Result = *copy.(*llm.ToolResultMessage)
+			next, err := handler(ctx, input)
+			if err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if next != nil {
+				blocks, err := llm.CloneContent(*next)
+				if err != nil {
+					return err
+				}
+				if blocks == nil {
+					blocks = []llm.ContentBlock{}
+				}
+				response.Result.Content, final = blocks, &blocks
+			}
+			return nil
+		})
+		if err != nil {
+			r.report(Failure{"after_tool", response.SessionID, response.RunID, err})
+			return nil, err
+		}
+	}
+	return final, nil
 }
 
 // Completed 在终态提交成功后调用。异常可观察，不改写已提交的 Run。
@@ -67,7 +143,19 @@ func (r *Registry) Completed(ctx context.Context, event Completion) {
 	handlers := append([]CompletionHook(nil), r.completed...)
 	r.mu.Unlock()
 	for _, handler := range handlers {
-		err := protected(func() error { return handler(ctx, event) })
+		err := protected(func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			copy := event
+			messages, err := (llm.RequestContext{Messages: event.Result.Messages}).Clone()
+			if err != nil {
+				return err
+			}
+			copy.Result.Messages = messages.Messages
+			copy.Result.Usage = maps.Clone(event.Result.Usage)
+			return handler(ctx, copy)
+		})
 		if err == nil {
 			err = ctx.Err()
 		}
@@ -85,12 +173,31 @@ func (r *Registry) BeforeTool(ctx context.Context, request ToolRequest) ToolDeci
 	r.mu.Lock()
 	handlers := append([]BeforeToolHook(nil), r.beforeTool...)
 	r.mu.Unlock()
+	var final ToolDecision
 	for _, handler := range handlers {
 		var decision ToolDecision
 		err := protected(func() error {
-			var err error
-			decision, err = handler(ctx, request)
-			return err
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			input := request
+			args, err := llm.CloneArguments(request.Call.Arguments)
+			if err != nil {
+				return err
+			}
+			input.Call.Arguments = args
+			decision, err = handler(ctx, input)
+			if err != nil {
+				return err
+			}
+			if decision.Arguments != nil && decision.Reason == "" {
+				args, err = llm.CloneArguments(*decision.Arguments)
+				if err != nil {
+					return err
+				}
+				request.Call.Arguments, final.Arguments = args, &args
+			}
+			return nil
 		})
 		if err == nil {
 			err = ctx.Err()
@@ -100,12 +207,13 @@ func (r *Registry) BeforeTool(ctx context.Context, request ToolRequest) ToolDeci
 			return ToolDecision{Reason: fmt.Sprintf("工具 Hook 拒绝: %v", err)}
 		}
 		if decision.Reason != "" {
-			return decision
+			return ToolDecision{Reason: decision.Reason}
 		}
 	}
-	return ToolDecision{}
+	return final
 }
 
+// protected 将回调的 panic 转成错误，交给对应调用点处理。
 func protected(fn func() error) (err error) {
 	defer func() {
 		if p := recover(); p != nil {

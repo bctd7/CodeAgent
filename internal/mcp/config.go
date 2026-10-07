@@ -16,6 +16,7 @@ const (
 )
 
 // ServerConfig 描述明确的连接参数，不负责加载配置。
+// 校验并补默认值后，调用方和使用方须在整个使用期间保持配置及共享引用只读。
 // 禁用配置同样校验；Env 保留 StdioConfig 的 nil 继承/非 nil 替换约定。
 type ServerConfig struct {
 	ID             string
@@ -34,6 +35,7 @@ type Identity struct {
 }
 
 // StdioConfig 只启动明确配置的命令，不经过 shell、不安装服务器。
+// 使用期间，调用方和使用方均不得修改配置及共享的 Args、Env。
 type StdioConfig struct {
 	ID       string
 	Identity Identity
@@ -49,13 +51,14 @@ type StdioConfig struct {
 }
 
 // HTTPConfig 指定 Streamable HTTP 地址；可注入带静态认证头的 HTTPClient。
+// 使用期间，调用方和使用方均不得修改配置、Headers 或 HTTPClient 字段。
 // 注入的 RoundTripper 不得自动重试 POST。此包不执行 OAuth 登录流程。
 type HTTPConfig struct {
 	ID         string
 	Identity   Identity
 	Endpoint   string
 	HTTPClient *http.Client
-	// Headers 是复制的静态请求头，不允许覆盖协议管理的请求头。
+	// Headers 在配置层共享只读，不允许覆盖协议管理的请求头。
 	Headers map[string]string
 }
 
@@ -173,26 +176,9 @@ func validateHeaders(headers map[string]string) error {
 	return nil
 }
 
-func cloneStrings(in []string) []string {
-	if in == nil {
-		return nil
-	}
-	return append([]string{}, in...)
-}
-func cloneHeaders(in map[string]string) map[string]string {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-// prepare 为管理器建立配置快照，补齐默认超时和传输实例 ID。
-// 快照内部只读；Stderr、Jar 和底层 RoundTripper 仍由调用方共享。
-func (s ServerConfig) prepare() ServerConfig {
+// withDefaults 仅为已校验配置补齐默认超时和传输实例 ID。
+// 只复制需补 ID 的结构体，引用字段共享；只读约定不提供并发修改保护。
+func (s ServerConfig) withDefaults() ServerConfig {
 	if s.ConnectTimeout == 0 {
 		s.ConnectTimeout = DefaultConnectTimeout
 	}
@@ -202,19 +188,11 @@ func (s ServerConfig) prepare() ServerConfig {
 	if s.Stdio != nil {
 		c := *s.Stdio
 		c.ID = s.ID
-		c.Args = cloneStrings(c.Args)
-		c.Env = cloneStrings(c.Env)
 		s.Stdio = &c
 	}
 	if s.HTTP != nil {
 		c := *s.HTTP
 		c.ID = s.ID
-		c.Headers = cloneHeaders(c.Headers)
-		if c.HTTPClient != nil {
-			// 隔离调用方字段变更；连接时另建副本安装传输包装。
-			h := *c.HTTPClient
-			c.HTTPClient = &h
-		}
 		s.HTTP = &c
 	}
 	return s

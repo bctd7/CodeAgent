@@ -93,7 +93,7 @@ func ConnectHTTP(ctx context.Context, cfg HTTPConfig) (*Client, error) {
 	return c, nil
 }
 
-// newHTTPClient 隔离客户端字段，复用底层传输并安装连接专用包装。
+// newHTTPClient 浅复制客户端后改写 CheckRedirect 和 Transport，底层传输仍共享。
 func newHTTPClient(cfg HTTPConfig, lifetime context.Context) *http.Client {
 	client := http.DefaultClient
 	if cfg.HTTPClient != nil {
@@ -106,11 +106,22 @@ func newHTTPClient(cfg HTTPConfig, lifetime context.Context) *http.Client {
 		base = http.DefaultTransport
 	}
 	if len(cfg.Headers) != 0 {
-		// ConnectHTTP 也可直接调用，请求头需成为连接私有快照。
+		// 保留连接层的请求头副本。
 		base = &headerTransport{base: base, headers: cloneHeaders(cfg.Headers)}
 	}
 	copyClient.Transport = &lifetimeTransport{base: base, ctx: lifetime}
 	return &copyClient
+}
+
+func cloneHeaders(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // lifetimeTransport 为 SDK 脱离调用方 context 的 HTTP 请求补上连接生命周期。

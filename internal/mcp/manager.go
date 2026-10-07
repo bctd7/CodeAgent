@@ -64,6 +64,7 @@ type Manager struct {
 	closeErr        error
 }
 
+// NewManager 先校验再补默认值；共享配置在管理器使用期间须由双方保持只读。
 func NewManager(specs []ServerConfig) (*Manager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{entries: make(map[string]*serverEntry), ctx: ctx, cancel: cancel}
@@ -81,7 +82,7 @@ func NewManager(specs []ServerConfig) (*Manager, error) {
 		if spec.Enabled {
 			state = ServerDisconnected
 		}
-		m.entries[spec.ID] = &serverEntry{spec: spec.prepare(), opGate: make(chan struct{}, 1), ctx: life, cancel: stop, status: ServerStatus{ID: spec.ID, State: state}}
+		m.entries[spec.ID] = &serverEntry{spec: spec.withDefaults(), opGate: make(chan struct{}, 1), ctx: life, cancel: stop, status: ServerStatus{ID: spec.ID, State: state}}
 	}
 	return m, nil
 }

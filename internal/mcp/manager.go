@@ -81,7 +81,7 @@ func NewManager(specs []ServerConfig) (*Manager, error) {
 		if spec.Enabled {
 			state = ServerDisconnected
 		}
-		m.entries[spec.ID] = &serverEntry{spec: spec.copied(), opGate: make(chan struct{}, 1), ctx: life, cancel: stop, status: ServerStatus{ID: spec.ID, State: state}}
+		m.entries[spec.ID] = &serverEntry{spec: spec.prepare(), opGate: make(chan struct{}, 1), ctx: life, cancel: stop, status: ServerStatus{ID: spec.ID, State: state}}
 	}
 	return m, nil
 }

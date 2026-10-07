@@ -70,26 +70,12 @@ func ConnectHTTP(ctx context.Context, cfg HTTPConfig) (*Client, error) {
 	if err := validateHeaders(cfg.Headers); err != nil {
 		return nil, wrapError(cfg.ID, "connect", ErrorInput, err)
 	}
-	client := http.DefaultClient
-	if cfg.HTTPClient != nil {
-		client = cfg.HTTPClient
-	}
-	copyClient := *client
-	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	// SDK 的初始化 GET 和 subscriptions/listen 使用独立 context。
 	// 初始化期间关联调用方取消，成功后停止关联；显式关闭仍取消所有 HTTP 请求。
 	lifetime, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	stop := context.AfterFunc(ctx, cancel)
-	base := copyClient.Transport
-	if base == nil {
-		base = http.DefaultTransport
-	}
-	if len(cfg.Headers) != 0 {
-		base = &headerTransport{base: base, headers: cloneHeaders(cfg.Headers)}
-	}
-	copyClient.Transport = &lifetimeTransport{base: base, ctx: lifetime}
 	c, err := connect(ctx, cfg.ID, cfg.Identity, &sdk.StreamableClientTransport{
-		Endpoint: cfg.Endpoint, HTTPClient: &copyClient,
+		Endpoint: cfg.Endpoint, HTTPClient: newHTTPClient(cfg, lifetime),
 		// 关闭 SDK 的 SSE 重新连接；工具调用不会重新发送。
 		MaxRetries: -1,
 	})
@@ -105,6 +91,26 @@ func ConnectHTTP(ctx context.Context, cfg HTTPConfig) (*Client, error) {
 	previousCancel := c.cancel
 	c.cancel = func() { previousCancel(); cancel() }
 	return c, nil
+}
+
+// newHTTPClient 隔离客户端字段，复用底层传输并安装连接专用包装。
+func newHTTPClient(cfg HTTPConfig, lifetime context.Context) *http.Client {
+	client := http.DefaultClient
+	if cfg.HTTPClient != nil {
+		client = cfg.HTTPClient
+	}
+	copyClient := *client
+	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	base := copyClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if len(cfg.Headers) != 0 {
+		// ConnectHTTP 也可直接调用，请求头需成为连接私有快照。
+		base = &headerTransport{base: base, headers: cloneHeaders(cfg.Headers)}
+	}
+	copyClient.Transport = &lifetimeTransport{base: base, ctx: lifetime}
+	return &copyClient
 }
 
 // lifetimeTransport 为 SDK 脱离调用方 context 的 HTTP 请求补上连接生命周期。

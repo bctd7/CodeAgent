@@ -70,51 +70,60 @@ func (s ServerConfig) Validate() error {
 	}
 	switch s.Transport {
 	case "stdio":
-		if s.Stdio == nil || s.HTTP != nil || strings.TrimSpace(s.Stdio.Command) == "" {
-			return fmt.Errorf("MCP server %q: stdio requires command and excludes HTTP fields", s.ID)
-		}
-		if s.Stdio.ID != "" && s.Stdio.ID != s.ID {
-			return fmt.Errorf("MCP server %q: conflicting stdio ID", s.ID)
-		}
-		if s.Stdio.TerminateDuration < 0 || s.Stdio.TerminateDuration > 24*time.Hour {
-			return fmt.Errorf("MCP server %q: invalid terminate duration", s.ID)
-		}
-		if strings.ContainsRune(s.Stdio.Command, 0) || strings.ContainsRune(s.Stdio.Dir, 0) {
-			return fmt.Errorf("MCP server %q: NUL in command or directory", s.ID)
-		}
-		for _, a := range s.Stdio.Args {
-			if strings.ContainsRune(a, 0) {
-				return fmt.Errorf("MCP server %q: NUL in argument", s.ID)
-			}
-		}
-		seen := map[string]bool{}
-		for _, value := range s.Stdio.Env {
-			name, _, ok := strings.Cut(value, "=")
-			if !ok || name == "" || strings.ContainsRune(value, 0) {
-				return fmt.Errorf("MCP server %q: invalid environment entry", s.ID)
-			}
-			// Windows 环境变量名不区分大小写；所有平台均拒绝歧义项。
-			name = strings.ToUpper(name)
-			if seen[name] {
-				return fmt.Errorf("MCP server %q: duplicate environment name", s.ID)
-			}
-			seen[name] = true
-		}
+		return s.validateStdio()
 	case "http":
-		if s.HTTP == nil || s.Stdio != nil {
-			return fmt.Errorf("MCP server %q: HTTP requires endpoint and excludes stdio fields", s.ID)
-		}
-		if s.HTTP.ID != "" && s.HTTP.ID != s.ID {
-			return fmt.Errorf("MCP server %q: conflicting HTTP ID", s.ID)
-		}
-		if err := validateEndpoint(s.HTTP.Endpoint); err != nil {
-			return fmt.Errorf("MCP server %q: %w", s.ID, err)
-		}
-		if err := validateHeaders(s.HTTP.Headers); err != nil {
-			return fmt.Errorf("MCP server %q: %w", s.ID, err)
-		}
+		return s.validateHTTP()
 	default:
 		return fmt.Errorf("MCP server %q: transport must be stdio or http", s.ID)
+	}
+}
+
+func (s ServerConfig) validateStdio() error {
+	if s.Stdio == nil || s.HTTP != nil || strings.TrimSpace(s.Stdio.Command) == "" {
+		return fmt.Errorf("MCP server %q: stdio requires command and excludes HTTP fields", s.ID)
+	}
+	if s.Stdio.ID != "" && s.Stdio.ID != s.ID {
+		return fmt.Errorf("MCP server %q: conflicting stdio ID", s.ID)
+	}
+	if s.Stdio.TerminateDuration < 0 || s.Stdio.TerminateDuration > 24*time.Hour {
+		return fmt.Errorf("MCP server %q: invalid terminate duration", s.ID)
+	}
+	if strings.ContainsRune(s.Stdio.Command, 0) || strings.ContainsRune(s.Stdio.Dir, 0) {
+		return fmt.Errorf("MCP server %q: NUL in command or directory", s.ID)
+	}
+	for _, a := range s.Stdio.Args {
+		if strings.ContainsRune(a, 0) {
+			return fmt.Errorf("MCP server %q: NUL in argument", s.ID)
+		}
+	}
+	seen := map[string]bool{}
+	for _, value := range s.Stdio.Env {
+		name, _, ok := strings.Cut(value, "=")
+		if !ok || name == "" || strings.ContainsRune(value, 0) {
+			return fmt.Errorf("MCP server %q: invalid environment entry", s.ID)
+		}
+		// Windows 环境变量名不区分大小写；所有平台均拒绝歧义项。
+		name = strings.ToUpper(name)
+		if seen[name] {
+			return fmt.Errorf("MCP server %q: duplicate environment name", s.ID)
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
+func (s ServerConfig) validateHTTP() error {
+	if s.HTTP == nil || s.Stdio != nil {
+		return fmt.Errorf("MCP server %q: HTTP requires endpoint and excludes stdio fields", s.ID)
+	}
+	if s.HTTP.ID != "" && s.HTTP.ID != s.ID {
+		return fmt.Errorf("MCP server %q: conflicting HTTP ID", s.ID)
+	}
+	if err := validateEndpoint(s.HTTP.Endpoint); err != nil {
+		return fmt.Errorf("MCP server %q: %w", s.ID, err)
+	}
+	if err := validateHeaders(s.HTTP.Headers); err != nil {
+		return fmt.Errorf("MCP server %q: %w", s.ID, err)
 	}
 	return nil
 }
@@ -181,7 +190,9 @@ func cloneHeaders(in map[string]string) map[string]string {
 	return out
 }
 
-func (s ServerConfig) copied() ServerConfig {
+// prepare 为管理器建立配置快照，补齐默认超时和传输实例 ID。
+// 快照内部只读；Stderr、Jar 和底层 RoundTripper 仍由调用方共享。
+func (s ServerConfig) prepare() ServerConfig {
 	if s.ConnectTimeout == 0 {
 		s.ConnectTimeout = DefaultConnectTimeout
 	}
@@ -200,6 +211,7 @@ func (s ServerConfig) copied() ServerConfig {
 		c.ID = s.ID
 		c.Headers = cloneHeaders(c.Headers)
 		if c.HTTPClient != nil {
+			// 隔离调用方字段变更；连接时另建副本安装传输包装。
 			h := *c.HTTPClient
 			c.HTTPClient = &h
 		}

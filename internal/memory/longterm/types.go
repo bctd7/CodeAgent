@@ -1,5 +1,6 @@
-// Package memory 提供独立的 Markdown 长期记忆，不负责会话监听或模型选择。
-package memory
+// Package longterm 提供独立的 Markdown 长期记忆，不负责会话监听或模型选择。
+// 调用期间输入、选项及流快照共享只读；Go 不强制冻结，也不保证并发修改安全。
+package longterm
 
 import (
 	"context"
@@ -9,9 +10,11 @@ import (
 )
 
 var (
-	ErrNoModel       = errors.New("memory: no model callback configured")
-	ErrBudget        = errors.New("memory: consolidation budget exceeded")
-	ErrBatchConflict = errors.New("memory: batch ID reused with different sources or cursor")
+	ErrNoModel       = errors.New("longterm: no model callback configured")
+	ErrBudget        = errors.New("longterm: consolidation budget exceeded")
+	ErrBatchConflict = errors.New("longterm: batch ID reused with different sources or cursor")
+	ErrLegacyBatch   = errors.New("longterm: legacy batch digest requires explicit migration")
+	ErrCommitPending = errors.New("longterm: published commit requires recovery")
 )
 
 // StreamFunc 必须合作响应 context 取消；本包不会发起默认或隐式模型请求。
@@ -56,6 +59,7 @@ type Outcome struct {
 	Cursor    string
 	Turns     int
 	ToolCalls int
+	Usage     llm.Usage
 }
 
 type Document struct {

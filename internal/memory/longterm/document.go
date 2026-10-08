@@ -1,4 +1,4 @@
-package memory
+package longterm
 
 import (
 	"encoding/json"
@@ -22,6 +22,7 @@ func formatTopic(summary, kind, body string, ids []string) string {
 func description(name, content string) string {
 	if header, _, ok := splitFrontmatter(content); ok {
 		for line := range strings.SplitSeq(header, "\n") {
+			line = strings.TrimSuffix(line, "\r")
 			if value, ok := strings.CutPrefix(line, "description: "); ok {
 				var summary string
 				if json.Unmarshal([]byte(value), &summary) == nil && validSummary(summary) {
@@ -82,20 +83,20 @@ func (s *Service) prepareEntry(e Entry) (string, error) {
 	}
 	_, _, hasFrontmatter := splitFrontmatter(strings.TrimSpace(e.Content))
 	if !validSummary(e.Summary) || !utf8.ValidString(e.Content) || strings.TrimSpace(e.Content) == "" || hasFrontmatter {
-		return "", fmt.Errorf("memory: invalid summary or body")
+		return "", fmt.Errorf("longterm: invalid summary or body")
 	}
 	switch e.Type {
 	case "user", "feedback", "project", "reference":
 	default:
-		return "", fmt.Errorf("memory: invalid memory type")
+		return "", fmt.Errorf("longterm: invalid memory type")
 	}
 	if len(e.Sources) == 0 {
-		return "", fmt.Errorf("memory: sources required")
+		return "", fmt.Errorf("longterm: sources required")
 	}
 	seen := map[string]bool{}
 	for _, id := range e.Sources {
 		if !utf8.ValidString(id) || strings.TrimSpace(id) == "" || len(id) > 256 || seen[id] {
-			return "", fmt.Errorf("memory: invalid source ID")
+			return "", fmt.Errorf("longterm: invalid source ID")
 		}
 		seen[id] = true
 	}
@@ -104,4 +105,29 @@ func (s *Service) prepareEntry(e Entry) (string, error) {
 		return "", fmt.Errorf("%w: topic size", ErrBudget)
 	}
 	return content, nil
+}
+
+// 旧正文无 frontmatter 时仍可读；已有来源必须能安全解析。
+func topicSources(content string) ([]string, error) {
+	header, _, ok := splitFrontmatter(content)
+	if !ok {
+		return nil, nil
+	}
+	for line := range strings.SplitSeq(header, "\n") {
+		value, found := strings.CutPrefix(strings.TrimSuffix(line, "\r"), "sources: ")
+		if !found {
+			continue
+		}
+		var ids []string
+		if err := json.Unmarshal([]byte(value), &ids); err != nil {
+			return nil, fmt.Errorf("longterm: invalid old sources: %w", err)
+		}
+		for _, id := range ids {
+			if !validID(id, 256) {
+				return nil, fmt.Errorf("longterm: invalid old source ID")
+			}
+		}
+		return ids, nil
+	}
+	return nil, nil
 }

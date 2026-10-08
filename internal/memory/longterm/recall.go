@@ -1,4 +1,4 @@
-package memory
+package longterm
 
 import (
 	"context"
@@ -129,7 +129,11 @@ func (s *Service) Put(ctx context.Context, entry Entry) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.commit(ctx, map[string]*string{entry.Path: &content})
+	state, err := s.readState()
+	if err != nil {
+		return err
+	}
+	_, err = s.commit(ctx, map[string]*string{entry.Path: &content}, state)
 	return err
 }
 
@@ -144,7 +148,11 @@ func (s *Service) Forget(ctx context.Context, path string) error {
 		return err
 	}
 	defer s.unlock()
-	_, err := s.commit(ctx, map[string]*string{path: nil})
+	state, err := s.readState()
+	if err != nil {
+		return err
+	}
+	_, err = s.commit(ctx, map[string]*string{path: nil}, state)
 	return err
 }
 

@@ -1,4 +1,4 @@
-package memory
+package longterm
 
 import (
 	"context"
@@ -26,6 +26,12 @@ type toolDefinition struct {
 	name, description string
 	properties        map[string]string
 	required          []string
+}
+
+// 实际读取过的来源用于主题合并；版本读取权限与来源集合分开保存。
+type readEvidence struct {
+	files   map[string]bool
+	sources []string
 }
 
 // 同一份定义用于模型目录与执行校验，执行工具时不再重建、序列化、反解 schema。
@@ -59,7 +65,8 @@ func catalog() []llm.Tool {
 	return tools
 }
 
-func (s *Service) execute(ctx context.Context, call llm.ContentBlock, trusted map[string]bool, staged map[string]*string, readFiles map[string]bool, read func(string) (string, error), manifest func() []string) (any, error) {
+func (s *Service) execute(ctx context.Context, call llm.ContentBlock, trusted map[string]bool, staged map[string]*string, evidence *readEvidence, read func(string) (string, error), manifest func() []string) (any, error) {
+	readFiles := evidence.files
 	// 先匹配独立工具目录，再严格解码；未知工具没有任何执行路径。
 	var definition *toolDefinition
 	for i := range toolDefinitions {
@@ -79,6 +86,9 @@ func (s *Service) execute(ctx context.Context, call llm.ContentBlock, trusted ma
 		if _, ok := definition.properties[key]; !ok {
 			return nil, fmt.Errorf("unknown argument %q", key)
 		}
+		if call.Arguments[key] == nil {
+			return nil, fmt.Errorf("null argument %q", key)
+		}
 	}
 	for _, key := range definition.required {
 		if value, ok := call.Arguments[key]; !ok || value == nil {
@@ -97,6 +107,13 @@ func (s *Service) execute(ctx context.Context, call llm.ContentBlock, trusted ma
 		if err != nil {
 			return nil, err
 		}
+		if args.Path != indexName {
+			ids, err := topicSources(text)
+			if err != nil {
+				return nil, err
+			}
+			evidence.sources = append(evidence.sources, ids...)
+		}
 		readFiles[args.Path] = true
 		return Document{Path: args.Path, Content: text}, nil
 	case "memory_search":
@@ -111,10 +128,12 @@ func (s *Service) execute(ctx context.Context, call llm.ContentBlock, trusted ma
 	if len(args.SourceIDs) == 0 {
 		return nil, fmt.Errorf("source_ids required")
 	}
+	seenSources := map[string]bool{}
 	for _, id := range args.SourceIDs {
-		if !trusted[id] {
+		if !trusted[id] || seenSources[id] {
 			return nil, fmt.Errorf("untrusted source ID %q", id)
 		}
+		seenSources[id] = true
 	}
 	old, err := read(args.Path)
 	if err != nil && !os.IsNotExist(err) {
@@ -128,7 +147,23 @@ func (s *Service) execute(ctx context.Context, call llm.ContentBlock, trusted ma
 			return nil, fmt.Errorf("read topic before deleting it")
 		}
 		staged[args.Path] = nil
+		delete(readFiles, args.Path)
 		return "deleted (staged)", nil
+	}
+	if err == nil {
+		oldSources, parseErr := topicSources(old)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		merged := make([]string, 0, len(oldSources)+len(evidence.sources)+len(args.SourceIDs))
+		seen := map[string]bool{}
+		for _, id := range append(append(oldSources, evidence.sources...), args.SourceIDs...) {
+			if !seen[id] {
+				merged = append(merged, id)
+				seen[id] = true
+			}
+		}
+		args.SourceIDs = merged
 	}
 	if call.Name == "memory_edit" {
 		if err != nil {
@@ -145,6 +180,7 @@ func (s *Service) execute(ctx context.Context, call llm.ContentBlock, trusted ma
 		return nil, err
 	}
 	staged[args.Path] = &content
+	delete(readFiles, args.Path) // 再次修改须读取当前暂存版本。
 	if len(manifest()) > s.options.Limits.Files {
 		return nil, fmt.Errorf("%w: topic count", ErrBudget)
 	}

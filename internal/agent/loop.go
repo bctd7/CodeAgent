@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
 	"CodeAgent/internal/llm"
@@ -21,6 +22,7 @@ type activeRun struct {
 	totalUsage llm.Usage
 	finishing  bool
 	err        error // 本轮执行错误，不影响后续任务准入
+	deferred   string
 }
 
 // runLoop 后台工作主循环，作为关闭收尾的唯一负责人。
@@ -141,11 +143,19 @@ func (a *Agent) executeRun(run *activeRun) {
 			req.SystemPrompt = decision.RequestContext.SystemPrompt
 			req.Messages = decision.RequestContext.Messages
 		}
-		run.steps++
 		if !a.canStartWorkLocked(run) {
 			a.finishRunAndUnlock(run, RunResult{}, nil)
 			return
 		}
+		a.mu.Unlock()
+		_, decision = a.handoff(run, Checkpoint{Kind: ModelCallStarting, StepIndex: stepIndex, Request: &req}, nil)
+		if decision.Kind == Stop {
+			a.mu.Lock()
+			a.finishRunAndUnlock(run, RunResult{}, nil)
+			return
+		}
+		a.mu.Lock()
+		run.steps++
 		a.mu.Unlock()
 		a.dispatcher.emit(Event{
 			Kind:      EventStepStart,
@@ -206,6 +216,25 @@ func (a *Agent) executeRun(run *activeRun) {
 				a.dispatcher.emit(stepEnd)
 				continue
 			}
+			if result.State == RunStateSuccess && result.StopReason == RunStopCompleted {
+				candidateResult := snapshotRunResult(run, *result)
+				a.mu.Unlock()
+				_, candidate := a.handoff(run, Checkpoint{Kind: RunEnding, StepIndex: stepIndex, Result: &candidateResult}, nil)
+				a.mu.Lock()
+				if candidate.Kind == Repeat && a.canStartWorkLocked(run) {
+					a.history = append(a.history, candidate.ContextMessages...)
+					run.messages = append(run.messages, candidate.ContextMessages...)
+					a.mu.Unlock()
+					a.dispatcher.emit(stepEnd)
+					continue
+				}
+				// 在候选结束等待期间接受的纠正仍属于当前任务。
+				if candidate.Kind != Stop && a.canStartWorkLocked(run) && len(a.steerQueue) > 0 {
+					a.mu.Unlock()
+					a.dispatcher.emit(stepEnd)
+					continue
+				}
+			}
 			a.finishRunAndUnlock(run, *result, &stepEnd)
 			return
 		}
@@ -214,6 +243,7 @@ func (a *Agent) executeRun(run *activeRun) {
 		// 调度执行工具
 		scheduler := newToolScheduler(a, run, stepIndex, toolCalls, responseID)
 		results, panicErr := scheduler.execute()
+		_, batchDecision := a.handoff(run, Checkpoint{Kind: ToolBatchFinished, StepIndex: stepIndex, ResponseID: responseID, ToolBatch: scheduler.outcomes}, nil)
 
 		// 工具结果严格按模型原始调用顺序追加至历史
 		a.mu.Lock()
@@ -222,6 +252,10 @@ func (a *Agent) executeRun(run *activeRun) {
 				a.history = append(a.history, tr)
 				run.messages = append(run.messages, tr)
 			}
+		}
+		if batchDecision.Kind == Continue {
+			a.history = append(a.history, batchDecision.ContextMessages...)
+			run.messages = append(run.messages, batchDecision.ContextMessages...)
 		}
 		a.mu.Unlock()
 
@@ -285,7 +319,21 @@ func (a *Agent) callStreamAndForward(ctx context.Context, runID string, stepInde
 			Timestamp: time.Now(),
 		})
 	}
+	if ctx.Err() != nil {
+		reader.Close()
+	}
 	return reader.Result(), nil
+}
+
+// snapshotRunResult 在持有 Agent 状态锁时补全本轮结果。
+// 复制消息切片和用量表，使结束候选在后续续跑时保持不变；消息对象仍按协议共享只读。
+func snapshotRunResult(run *activeRun, result RunResult) RunResult {
+	result.RunID = run.id
+	result.Steps = run.steps
+	result.Messages = copyHistory(run.messages)
+	result.Usage = maps.Clone(run.usage)
+	result.TotalUsage = run.totalUsage
+	return result
 }
 
 // finishRunAndUnlock 持锁确定终态，交接确认后保存内存结果并分发完成事件。
@@ -293,12 +341,7 @@ func (a *Agent) callStreamAndForward(ctx context.Context, runID string, stepInde
 func (a *Agent) finishRunAndUnlock(run *activeRun, result RunResult, stepEnd *Event) {
 	var droppedTasks []droppedTaskInfo
 
-	// 统一填充公共字段，避免各分支重复构造
-	result.RunID = run.id
-	result.Steps = run.steps
-	result.Messages = run.messages
-	result.Usage = run.usage
-	result.TotalUsage = run.totalUsage
+	result = snapshotRunResult(run, result)
 
 	// 未消费的纠正属于当前 Run，不能留给下一任务。
 	droppedSteers := a.steerQueue
@@ -328,6 +371,13 @@ func (a *Agent) finishRunAndUnlock(run *activeRun, result RunResult, stepEnd *Ev
 		result.State = RunStateError
 		result.StopReason, result.RawStopReason = "", ""
 		result.ErrorMessage, result.Error = run.err.Error(), run.err
+	}
+	if run.deferred != "" && run.err == nil && a.status != AgentStatusCancelling && a.status != AgentStatusClosed {
+		result.State = RunStateDeferred
+		result.StopReason = ""
+		result.RawStopReason = ""
+		result.Error = nil
+		result.ErrorMessage = run.deferred
 	}
 	if a.executionErr != nil {
 		result.State = RunStateError

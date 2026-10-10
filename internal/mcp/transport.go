@@ -1,12 +1,10 @@
+// 底层传输适配与连接回收。
 package mcp
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
-	"os/exec"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -14,7 +12,9 @@ import (
 
 // ownedTransport 记录 SDK 连接供失败时回收，并保护 stdio 初始化期间的堵塞 I/O。
 type ownedTransport struct {
+	//建立传输的对象
 	sdk.Transport
+	// 传输的本身，用于初始化失败以后还能释放这个连接
 	connection sdk.Connection
 	stop       func() bool
 }
@@ -41,56 +41,6 @@ func (c *cancelWriteConnection) Write(ctx context.Context, msg jsonrpc.Message) 
 	stop := context.AfterFunc(ctx, func() { _ = c.Connection.Close() })
 	defer stop()
 	return c.Connection.Write(ctx, msg)
-}
-
-// ConnectStdio 启动自有直接子进程并完成初始化。ctx 仅控制建立连接，
-// 建立成功后进程生命周期由 Close 控制，不随连接 ctx 到期而终止。
-func ConnectStdio(ctx context.Context, cfg StdioConfig) (*Client, error) {
-	if cfg.Command == "" {
-		return nil, wrapError(cfg.ID, "connect", ErrorInput, errors.New("stdio 命令不能为空"))
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, operationError(cfg.ID, "connect", err)
-	}
-	cmd := exec.Command(cfg.Command, cfg.Args...)
-	cmd.Dir = cfg.Dir
-	cmd.Env = cfg.Env
-	cmd.Stderr = cfg.Stderr
-	// 限制后代继承 stderr 管道造成的退出等待；无法解除阻塞的自定义 writer。
-	cmd.WaitDelay = 5 * time.Second
-	return connect(ctx, cfg.ID, cfg.Identity, &sdk.CommandTransport{Command: cmd, TerminateDuration: cfg.TerminateDuration})
-}
-
-// ConnectHTTP 完成协议初始化。禁止自动跟随重定向，以免重放 tools/call。
-// 对 HTTPClient 做浅复制，不修改或关闭调用方共享的 transport。
-func ConnectHTTP(ctx context.Context, cfg HTTPConfig) (*Client, error) {
-	if err := validateEndpoint(cfg.Endpoint); err != nil {
-		return nil, wrapError(cfg.ID, "connect", ErrorInput, err)
-	}
-	if err := validateHeaders(cfg.Headers); err != nil {
-		return nil, wrapError(cfg.ID, "connect", ErrorInput, err)
-	}
-	// SDK 的初始化 GET 和 subscriptions/listen 使用独立 context。
-	// 初始化期间关联调用方取消，成功后停止关联；显式关闭仍取消所有 HTTP 请求。
-	lifetime, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	stop := context.AfterFunc(ctx, cancel)
-	c, err := connect(ctx, cfg.ID, cfg.Identity, &sdk.StreamableClientTransport{
-		Endpoint: cfg.Endpoint, HTTPClient: newHTTPClient(cfg, lifetime),
-		// 关闭 SDK 的 SSE 重新连接；工具调用不会重新发送。
-		MaxRetries: -1,
-	})
-	stop()
-	if err == nil && ctx.Err() != nil {
-		_ = c.Close()
-		err = operationError(cfg.ID, "connect", ctx.Err())
-	}
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	previousCancel := c.cancel
-	c.cancel = func() { previousCancel(); cancel() }
-	return c, nil
 }
 
 // newHTTPClient 浅复制客户端后改写 CheckRedirect 和 Transport，底层传输仍共享。

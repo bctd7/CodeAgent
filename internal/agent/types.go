@@ -31,7 +31,7 @@ const (
 	RunStateError RunState = "error"
 	// 用户中断或者超时
 	RunStateAborted RunState = "aborted"
-	// 延迟响应（本阶段暂不生成）
+	// 宿主要求延后，本次任务结束且不会自动重放。
 	RunStateDeferred RunState = "deferred"
 )
 
@@ -97,4 +97,6 @@ type Config struct {
 		MaxSteps int // 当前不启用调用次数上限
 	*/
 	MaxParallelTools int // 默认 4，负数拒绝
+	MaxQueuedRuns    int // 默认 128；仅限制尚未开始的任务。
+	MaxSteers        int // 默认 128；限制尚未消费的纠正。
 }

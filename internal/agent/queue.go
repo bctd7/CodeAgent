@@ -81,6 +81,7 @@ func (a *Agent) enqueueDroppedTasks(tasks []droppedTaskInfo) {
 		a.dispatcher.enqueue(Event{
 			Kind:      EventInputDropped,
 			RunID:     item.q.id,
+			Message:   item.q.userMsg,
 			Detail:    item.reason,
 			Timestamp: time.Now(),
 		})

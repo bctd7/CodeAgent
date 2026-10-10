@@ -29,13 +29,17 @@ const (
 
 // Event 是 Agent 生命周期与执行过程中的对外通知事件。
 type Event struct {
-	Kind         EventKind         `json:"kind"`
-	RunID        string            `json:"run_id,omitempty"`
-	StepIndex    int               `json:"step_index,omitempty"`
-	ToolCallID   string            `json:"tool_call_id,omitempty"`
-	ToolName     string            `json:"tool_name,omitempty"`
-	LLMEvent     *llm.Event        `json:"llm_event,omitempty"`
-	Message      llm.Message       `json:"message,omitempty"`
+	Kind       EventKind  `json:"kind"`
+	RunID      string     `json:"run_id,omitempty"`
+	StepIndex  int        `json:"step_index,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolName   string     `json:"tool_name,omitempty"`
+	LLMEvent   *llm.Event `json:"llm_event,omitempty"`
+	// Message 仅承载接受或丢弃的用户输入；工具结束使用 ToolOutcome 明确区分原始结果与投影。
+	Message llm.Message `json:"message,omitempty"`
+	// ToolOutcome 用于 ToolEnd 和 ToolSkipped，与批次结果使用同一执行事实和模型投影。
+	// 事件及其嵌套对象只读；Result 是模型可见结果，RawResult 是加工前结果。
+	ToolOutcome  *ToolOutcome      `json:"tool_outcome,omitempty"`
 	Result       *RunResult        `json:"result,omitempty"`
 	ContentBlock *llm.ContentBlock `json:"content_block,omitempty"`
 	Detail       string            `json:"detail,omitempty"`

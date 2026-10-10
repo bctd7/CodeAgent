@@ -168,6 +168,14 @@ func (session *Session) Clear() {
 	clear(session.once)
 }
 
+// Discard 使一个已结束、取消或超时请求的确认失效，不影响其他并行审批。
+func (session *Session) Discard(requestID string) {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	delete(session.pending, requestID)
+	delete(session.once, requestID)
+}
+
 func snapshotRequest(request Request) Request {
 	request.FileTargets = slices.Clone(request.FileTargets)
 	return request

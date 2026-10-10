@@ -49,21 +49,12 @@ func New(caller Caller, definitions []mcpcore.Definition, reservedNames []string
 		if d.Key.ServerID == "" || d.Key.Name == "" || d.Tool == nil || d.Tool.Name != d.Key.Name || d.Generation == 0 || d.Revision == 0 {
 			return Adapted{}, fmt.Errorf("invalid MCP definition binding")
 		}
-		schema, err := json.Marshal(d.Tool.InputSchema)
-		if err != nil {
-			result.Rejected = append(result.Rejected, Rejection{d.Key, "input schema cannot be encoded"})
+		schema, reason := inputSchema(d)
+		if reason != "" {
+			result.Rejected = append(result.Rejected, Rejection{d.Key, reason})
 			continue
 		}
-		var shape map[string]any
-		if err := json.Unmarshal(schema, &shape); err != nil || shape == nil || shape["type"] != "object" {
-			result.Rejected = append(result.Rejected, Rejection{d.Key, "input schema must declare type object"})
-			continue
-		}
-		if d.UnsupportedReason != "" || hasHeaderExtension(shape) {
-			result.Rejected = append(result.Rejected, Rejection{d.Key, "x-mcp-header tools are unsupported in this connection; use an ordinary tool or reconnect after removing the extension"})
-			continue
-		}
-		name := ToolName(d.Key)
+		name := toolName(d.Key)
 		if used[name] {
 			return Adapted{}, fmt.Errorf("MCP model tool name conflicts with another registration: %q", name)
 		}
@@ -73,31 +64,52 @@ func New(caller Caller, definitions []mcpcore.Definition, reservedNames []string
 		result.Tools = append(result.Tools, agent.Tool{
 			Tool:         llm.Tool{Name: name, Description: d.Tool.Description, Schema: schema},
 			ParallelSafe: false,
-			Execute: func(ctx context.Context, _ string, args map[string]any, _ func(llm.ContentBlock)) ([]llm.ContentBlock, error) {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				if args == nil {
-					args = map[string]any{}
-				}
-				raw, err := json.Marshal(args)
-				if err != nil {
-					return nil, fmt.Errorf("MCP arguments cannot be encoded: %w", err)
-				}
-				response, err := caller.CallTool(ctx, binding, raw)
-				if err != nil {
-					return nil, err
-				}
-				return convertResult(response)
-			},
+			Execute:      toolExecutor(caller, binding),
 		})
 	}
 	return result, nil
 }
 
-// ToolName 稳定且不超过 64 个 ASCII 字符，通过结构化键的摘要保留身份，
+// inputSchema 返回编码副本或拒绝原因，检查 schema 形状和扩展限制。
+func inputSchema(d mcpcore.Definition) ([]byte, string) {
+	schema, err := json.Marshal(d.Tool.InputSchema)
+	if err != nil {
+		return nil, "input schema cannot be encoded"
+	}
+	var shape map[string]any
+	if err := json.Unmarshal(schema, &shape); err != nil || shape == nil || shape["type"] != "object" {
+		return nil, "input schema must declare type object"
+	}
+	if d.UnsupportedReason != "" || hasHeaderExtension(shape) {
+		return nil, "x-mcp-header tools are unsupported in this connection; use an ordinary tool or reconnect after removing the extension"
+	}
+	return schema, ""
+}
+
+// toolExecutor 绑定路由与版本，返回一次调用并转换结果的执行函数。
+func toolExecutor(caller Caller, binding mcpcore.Definition) func(context.Context, string, map[string]any, func(llm.ContentBlock)) ([]llm.ContentBlock, error) {
+	return func(ctx context.Context, _ string, args map[string]any, _ func(llm.ContentBlock)) ([]llm.ContentBlock, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if args == nil {
+			args = map[string]any{}
+		}
+		raw, err := json.Marshal(args)
+		if err != nil {
+			return nil, fmt.Errorf("MCP arguments cannot be encoded: %w", err)
+		}
+		response, err := caller.CallTool(ctx, binding, raw)
+		if err != nil {
+			return nil, err
+		}
+		return convertResult(response)
+	}
+}
+
+// toolName 稳定且不超过 64 个 ASCII 字符，通过结构化键的摘要保留身份，
 // 不解析分隔符；New 仍检查摘要/名称冲突。
-func ToolName(key mcpcore.ToolKey) string {
+func toolName(key mcpcore.ToolKey) string {
 	encoded, _ := json.Marshal(key)
 	hash := sha256.Sum256(encoded)
 	return "mcp_" + slug(key.ServerID, 12) + "_" + slug(key.Name, 20) + "_" + hex.EncodeToString(hash[:12])

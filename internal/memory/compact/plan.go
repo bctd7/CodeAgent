@@ -22,20 +22,14 @@ func Prepare(input Input) (Plan, error) {
 	if err != nil {
 		return Plan{}, failure(InvalidInput, err)
 	}
-	plan := Plan{prepared: true, PreviousSummary: input.PreviousSummary, Settings: input.Settings}
-	plan.EstimatedTokensBefore = charsToTokens(textChars(input.PreviousSummary))
+	plan := Plan{Input: input}
 	var cuts []int
 	for i, source := range input.Sources {
-		plan.EstimatedTokensBefore, err = addTokens(plan.EstimatedTokensBefore, tokens[i])
-		if err != nil {
-			return Plan{}, failure(InvalidInput, err)
-		}
 		if _, toolResult := source.Message.(*llm.ToolResultMessage); !toolResult && safe[i] {
 			cuts = append(cuts, i)
 		}
 	}
 	if len(cuts) == 0 {
-		plan.Retained = input.Sources
 		return plan, nil
 	}
 	cut, accumulated := cuts[0], 0
@@ -56,21 +50,15 @@ func Prepare(input Input) (Plan, error) {
 			break
 		}
 	}
-	plan.FirstKeptIndex, plan.FirstKeptEntryID = cut, input.Sources[cut].ID
-	plan.Retained = input.Sources[cut:]
-	plan.Ready = cut > 0
-	historyEnd := cut
+	plan.FirstKeptIndex, plan.HistoryEnd = cut, cut
 	if _, assistant := input.Sources[cut].Message.(*llm.AssistantMessage); assistant {
 		for i := cut - 1; i >= 0; i-- {
 			if _, user := input.Sources[i].Message.(*llm.UserMessage); user {
-				plan.IsSplitTurn = true
-				historyEnd = i
-				plan.TurnPrefix = input.Sources[i:cut]
+				plan.HistoryEnd = i
 				break
 			}
 		}
 	}
-	plan.History = input.Sources[:historyEnd]
 	return plan, nil
 }
 

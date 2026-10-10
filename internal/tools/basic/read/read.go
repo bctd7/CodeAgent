@@ -15,7 +15,8 @@ import (
 
 	"CodeAgent/internal/agent"
 	"CodeAgent/internal/llm"
-	"CodeAgent/internal/tools/basic/common"
+	"CodeAgent/internal/tools/internal/output"
+	"CodeAgent/internal/tools/internal/pathutil"
 )
 
 const (
@@ -69,7 +70,7 @@ func executeRead(ctx context.Context, workingDir string, args map[string]any) ([
 		return nil, err
 	}
 
-	resolvedPath, err := common.ResolvePath(workingDir, pathStr)
+	resolvedPath, err := pathutil.ResolvePath(workingDir, pathStr)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +137,7 @@ func executeRead(ctx context.Context, workingDir string, args map[string]any) ([
 		textContent = textContent[len("\ufeff"):]
 	}
 
-	allLines := common.SplitLinesForCounting(textContent)
+	allLines := output.SplitLinesForCounting(textContent)
 	totalFileLines := len(allLines)
 	if totalFileLines == 0 {
 		return []llm.ContentBlock{{Type: llm.TypeText, Text: ""}}, nil
@@ -162,16 +163,16 @@ func executeRead(ctx context.Context, workingDir string, args map[string]any) ([
 		selectedContent = strings.Join(allLines[startLine:], "\n")
 	}
 
-	truncation := truncateHead(selectedContent, common.TruncateOptions{})
+	truncation := truncateHead(selectedContent, output.TruncateOptions{})
 	var outputText string
 	if truncation.FirstLineExceedsLimit {
-		firstLineSize := common.FormatSize(len(allLines[startLine]))
+		firstLineSize := output.FormatSize(len(allLines[startLine]))
 		if startLineDisplay < totalFileLines {
 			outputText = fmt.Sprintf("[Line %d is %s, exceeds %s limit. Use offset=%d or a shell command to inspect.]",
-				startLineDisplay, firstLineSize, common.FormatSize(common.DefaultMaxBytes), startLineDisplay+1)
+				startLineDisplay, firstLineSize, output.FormatSize(output.DefaultMaxBytes), startLineDisplay+1)
 		} else {
 			outputText = fmt.Sprintf("[Line %d is %s, exceeds %s limit. Use a shell command to inspect.]",
-				startLineDisplay, firstLineSize, common.FormatSize(common.DefaultMaxBytes))
+				startLineDisplay, firstLineSize, output.FormatSize(output.DefaultMaxBytes))
 		}
 	} else if truncation.Truncated {
 		endLineDisplay := startLineDisplay + truncation.OutputLines - 1
@@ -182,7 +183,7 @@ func executeRead(ctx context.Context, workingDir string, args map[string]any) ([
 				startLineDisplay, endLineDisplay, totalFileLines, nextOffset)
 		} else {
 			outputText += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Use offset=%d to continue.]",
-				startLineDisplay, endLineDisplay, totalFileLines, common.FormatSize(common.DefaultMaxBytes), nextOffset)
+				startLineDisplay, endLineDisplay, totalFileLines, output.FormatSize(output.DefaultMaxBytes), nextOffset)
 		}
 	} else if userLimitedLines != nil && startLine+*userLimitedLines < totalFileLines {
 		remaining := totalFileLines - (startLine + *userLimitedLines)
@@ -376,22 +377,22 @@ func isBMPWithLength(buf []byte, fileLength uint64) bool {
 // truncateHead 保留文本开头的完整行，适用于文件读取等从头部查看的场景。
 // 统一默认文本上限为 2000 行、50 KiB，先达到者生效。
 // 首行单独超过字节上限时，返回空内容并置 FirstLineExceedsLimit 为 true。
-func truncateHead(content string, opts common.TruncateOptions) common.TruncateResult {
+func truncateHead(content string, opts output.TruncateOptions) output.TruncateResult {
 	maxLines := opts.MaxLines
 	if maxLines <= 0 {
-		maxLines = common.DefaultMaxLines
+		maxLines = output.DefaultMaxLines
 	}
 	maxBytes := opts.MaxBytes
 	if maxBytes <= 0 {
-		maxBytes = common.DefaultMaxBytes
+		maxBytes = output.DefaultMaxBytes
 	}
 
 	totalBytes := len(content)
-	lines := common.SplitLinesForCounting(content)
+	lines := output.SplitLinesForCounting(content)
 	totalLines := len(lines)
 
 	if totalLines <= maxLines && totalBytes <= maxBytes {
-		return common.TruncateResult{
+		return output.TruncateResult{
 			Content:     content,
 			Truncated:   false,
 			TruncatedBy: "",
@@ -403,7 +404,7 @@ func truncateHead(content string, opts common.TruncateOptions) common.TruncateRe
 	}
 
 	if len(lines) > 0 && len(lines[0]) > maxBytes {
-		return common.TruncateResult{
+		return output.TruncateResult{
 			Content:               "",
 			Truncated:             true,
 			TruncatedBy:           "bytes",
@@ -440,7 +441,7 @@ func truncateHead(content string, opts common.TruncateOptions) common.TruncateRe
 	}
 
 	outputContent := strings.Join(outputLinesArr, "\n")
-	return common.TruncateResult{
+	return output.TruncateResult{
 		Content:     outputContent,
 		Truncated:   true,
 		TruncatedBy: truncatedBy,

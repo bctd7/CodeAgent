@@ -32,20 +32,14 @@ type Input struct {
 	Settings        Settings
 }
 
-// Plan 由 Prepare 生成；各区段共享输入引用，生成后须保持只读。
-// History、TurnPrefix、Retained 按顺序完整划分本次 Sources。
+// Plan 由 Prepare 生成，保存原输入和两个数组切分下标；使用期间须保持只读。
+// Input.Sources[:HistoryEnd] 是历史，Input.Sources[HistoryEnd:FirstKeptIndex]
+// 是当前轮前缀，Input.Sources[FirstKeptIndex:] 是连续保留原文。
+// 两个下标相等表示没有轮次前缀；FirstKeptIndex 为 0 表示没有可总结前缀。
 type Plan struct {
-	prepared              bool
-	Ready                 bool // 有可总结前缀，与自动触发阈值无关。
-	PreviousSummary       string
-	History               []Source
-	TurnPrefix            []Source
-	Retained              []Source
-	IsSplitTurn           bool
-	FirstKeptEntryID      string
-	FirstKeptIndex        int
-	EstimatedTokensBefore int // 仅旧摘要和消息的近似值，不含系统提示及工具定义。
-	Settings              Settings
+	Input          Input
+	HistoryEnd     int // 历史结束下标，不包含该位置。
+	FirstKeptIndex int // 保留原文开始下标，包含该位置；不是轮次编号。
 }
 
 // StreamFunc 必须响应 ctx；返回的 reader.Close 必须解除 Result 的阻塞。
@@ -60,12 +54,10 @@ type Options struct {
 // Result 仅在 Summarize 成功时填充 Summary 和保留边界。
 // 失败仍可携带已产生的 Usage；调用方须检查 error 和 Compacted。
 type Result struct {
-	Compacted             bool
-	Summary               string
-	FirstKeptEntryID      string
-	FirstKeptIndex        int
-	EstimatedTokensBefore int
-	Usage                 llm.Usage
+	Compacted      bool
+	Summary        string
+	FirstKeptIndex int // 相对于本次 Input.Sources；消息 ID 从 Sources 此位置取得。
+	Usage          llm.Usage
 }
 
 type ErrorKind string

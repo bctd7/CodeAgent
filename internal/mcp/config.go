@@ -1,8 +1,6 @@
 package mcp
 
 import (
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -64,11 +62,11 @@ type HTTPConfig struct {
 
 func (s ServerConfig) Validate() error {
 	if !validServerID(s.ID) {
-		return errors.New("MCP server ID must use 1..128 ASCII letters, digits, '.', '_' or '-'")
+		return inputError(s.ID, "validate", "MCP server ID must use 1..128 ASCII letters, digits, '.', '_' or '-'")
 	}
 	for _, d := range []time.Duration{s.ConnectTimeout, s.RequestTimeout} {
 		if d < 0 || d > 24*time.Hour {
-			return fmt.Errorf("MCP server %q: timeout must be 0..24h (zero uses default)", s.ID)
+			return inputError(s.ID, "validate", "MCP server %q: timeout must be 0..24h (zero uses default)", s.ID)
 		}
 	}
 	switch s.Transport {
@@ -77,38 +75,38 @@ func (s ServerConfig) Validate() error {
 	case "http":
 		return s.validateHTTP()
 	default:
-		return fmt.Errorf("MCP server %q: transport must be stdio or http", s.ID)
+		return inputError(s.ID, "validate", "MCP server %q: transport must be stdio or http", s.ID)
 	}
 }
 
 func (s ServerConfig) validateStdio() error {
 	if s.Stdio == nil || s.HTTP != nil || strings.TrimSpace(s.Stdio.Command) == "" {
-		return fmt.Errorf("MCP server %q: stdio requires command and excludes HTTP fields", s.ID)
+		return inputError(s.ID, "validate", "MCP server %q: stdio requires command and excludes HTTP fields", s.ID)
 	}
 	if s.Stdio.ID != "" && s.Stdio.ID != s.ID {
-		return fmt.Errorf("MCP server %q: conflicting stdio ID", s.ID)
+		return inputError(s.ID, "validate", "MCP server %q: conflicting stdio ID", s.ID)
 	}
 	if s.Stdio.TerminateDuration < 0 || s.Stdio.TerminateDuration > 24*time.Hour {
-		return fmt.Errorf("MCP server %q: invalid terminate duration", s.ID)
+		return inputError(s.ID, "validate", "MCP server %q: invalid terminate duration", s.ID)
 	}
 	if strings.ContainsRune(s.Stdio.Command, 0) || strings.ContainsRune(s.Stdio.Dir, 0) {
-		return fmt.Errorf("MCP server %q: NUL in command or directory", s.ID)
+		return inputError(s.ID, "validate", "MCP server %q: NUL in command or directory", s.ID)
 	}
 	for _, a := range s.Stdio.Args {
 		if strings.ContainsRune(a, 0) {
-			return fmt.Errorf("MCP server %q: NUL in argument", s.ID)
+			return inputError(s.ID, "validate", "MCP server %q: NUL in argument", s.ID)
 		}
 	}
 	seen := map[string]bool{}
 	for _, value := range s.Stdio.Env {
 		name, _, ok := strings.Cut(value, "=")
 		if !ok || name == "" || strings.ContainsRune(value, 0) {
-			return fmt.Errorf("MCP server %q: invalid environment entry", s.ID)
+			return inputError(s.ID, "validate", "MCP server %q: invalid environment entry", s.ID)
 		}
 		// Windows 环境变量名不区分大小写；所有平台均拒绝歧义项。
 		name = strings.ToUpper(name)
 		if seen[name] {
-			return fmt.Errorf("MCP server %q: duplicate environment name", s.ID)
+			return inputError(s.ID, "validate", "MCP server %q: duplicate environment name", s.ID)
 		}
 		seen[name] = true
 	}
@@ -117,16 +115,16 @@ func (s ServerConfig) validateStdio() error {
 
 func (s ServerConfig) validateHTTP() error {
 	if s.HTTP == nil || s.Stdio != nil {
-		return fmt.Errorf("MCP server %q: HTTP requires endpoint and excludes stdio fields", s.ID)
+		return inputError(s.ID, "validate", "MCP server %q: HTTP requires endpoint and excludes stdio fields", s.ID)
 	}
 	if s.HTTP.ID != "" && s.HTTP.ID != s.ID {
-		return fmt.Errorf("MCP server %q: conflicting HTTP ID", s.ID)
+		return inputError(s.ID, "validate", "MCP server %q: conflicting HTTP ID", s.ID)
 	}
 	if err := validateEndpoint(s.HTTP.Endpoint); err != nil {
-		return fmt.Errorf("MCP server %q: %w", s.ID, err)
+		return operationError(s.ID, "validate", err)
 	}
 	if err := validateHeaders(s.HTTP.Headers); err != nil {
-		return fmt.Errorf("MCP server %q: %w", s.ID, err)
+		return operationError(s.ID, "validate", err)
 	}
 	return nil
 }
@@ -146,7 +144,7 @@ func validServerID(id string) bool {
 func validateEndpoint(endpoint string) error {
 	u, err := url.Parse(endpoint)
 	if err != nil || u == nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Fragment != "" {
-		return errors.New("MCP endpoint must be HTTP(S), without user information or fragment")
+		return inputError("", "validate", "MCP endpoint must be HTTP(S), without user information or fragment")
 	}
 	return nil
 }
@@ -156,21 +154,21 @@ func validateHeaders(headers map[string]string) error {
 	for name, value := range headers {
 		lower := strings.ToLower(name)
 		if name == "" || seen[lower] {
-			return errors.New("MCP headers contain empty or duplicate name")
+			return inputError("", "validate", "MCP headers contain empty or duplicate name")
 		}
 		seen[lower] = true
 		for _, c := range name {
 			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", c)) {
-				return errors.New("MCP header name is invalid")
+				return inputError("", "validate", "MCP header name is invalid")
 			}
 		}
 		for _, c := range value {
 			if c == '\r' || c == '\n' || c < 32 && c != '\t' || c == 127 {
-				return errors.New("MCP header value contains control characters")
+				return inputError("", "validate", "MCP header value contains control characters")
 			}
 		}
 		if strings.HasPrefix(lower, "mcp-") || lower == "host" || lower == "content-length" || lower == "content-type" || lower == "accept" || lower == "connection" || lower == "transfer-encoding" || lower == "last-event-id" {
-			return errors.New("MCP static header overrides a transport-owned header")
+			return inputError("", "validate", "MCP static header overrides a transport-owned header")
 		}
 	}
 	return nil

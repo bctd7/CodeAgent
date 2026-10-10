@@ -14,7 +14,7 @@ import (
 )
 
 // CurrentSchemaVersion 是当前支持的表结构和消息格式版本。
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 // Store 负责底层数据库连接生命周期、配置以及提供可复用的事务执行能力。
 type Store struct {
@@ -63,7 +63,7 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// Init 作为统一入口识别空库、当前版本、受支持旧版本和未知／更高版本，再调用对应流程。
+// Init 作为统一入口初始化空库或验证当前版本；已有旧结构明确拒绝，不执行升级。
 func (s *Store) Init(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -95,12 +95,12 @@ func (s *Store) Init(ctx context.Context) error {
 		return nil
 	}
 
-	if err := migrateDatabase(ctx, tx, version, existingTables); err != nil {
+	if err := validateDatabase(ctx, tx, version, existingTables); err != nil {
 		return err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("提交数据库迁移事务: %w", err)
+		return fmt.Errorf("提交数据库检查事务: %w", err)
 	}
 	return nil
 }

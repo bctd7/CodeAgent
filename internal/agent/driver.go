@@ -13,12 +13,16 @@ type CheckpointID uint64
 type CheckpointKind string
 
 const (
-	RunStarting        CheckpointKind = "run_starting"
-	InputConsumed      CheckpointKind = "input_consumed"
-	ModelRequestReady  CheckpointKind = "model_request_ready"
+	RunStarting       CheckpointKind = "run_starting"
+	InputConsumed     CheckpointKind = "input_consumed"
+	ModelRequestReady CheckpointKind = "model_request_ready"
+	// 确认后必定调用 Stream（即使随后取消）；协调者在此保存尝试调用事实。
+	ModelCallStarting  CheckpointKind = "model_call_starting"
 	ModelResponseReady CheckpointKind = "model_response_ready"
 	ToolStarting       CheckpointKind = "tool_starting"
 	ToolFinished       CheckpointKind = "tool_finished"
+	ToolBatchFinished  CheckpointKind = "tool_batch_finished"
+	RunEnding          CheckpointKind = "run_ending"
 	RunFinishing       CheckpointKind = "run_finishing"
 )
 
@@ -37,7 +41,11 @@ type Checkpoint struct {
 	ResponseID  CheckpointID
 	ToolCall    *llm.ContentBlock
 	ToolResult  *llm.ToolResultMessage
-	Result      *RunResult
+	ToolOutcome *ToolOutcome
+	ToolBatch   []ToolOutcome
+	// Result 在 RunEnding 为字段齐全的结束候选，在 RunFinishing 为待提交终态。
+	// 候选不保证成为终态；Repeat、纠正、取消或故障仍可改变后续结果。
+	Result *RunResult
 }
 
 type DecisionKind string
@@ -46,6 +54,8 @@ const (
 	Continue DecisionKind = "continue"
 	Skip     DecisionKind = "skip"
 	Stop     DecisionKind = "stop"
+	Repeat   DecisionKind = "repeat"
+	DeferRun DecisionKind = "defer"
 )
 
 // RequestContext 只承载本次请求可替换的系统提示词和消息，不提供复制或隔离。
@@ -58,13 +68,20 @@ type RequestContext struct {
 // 替换数据在 Resolve 成功交接后不得再由返回者修改。
 // 替换值与输入共享的未修改嵌套数据仍须只读；交接不做深复制。
 type Decision struct {
-	Kind   DecisionKind
-	Reason string
-	Error  error
-	// 载荷只能替换对应数据，且仅 Continue 决策允许携带。
+	// Disposition 仅用于 Skip，区分策略拒绝与取消/纠正造成的未执行。
+	Disposition ToolStatus
+	Kind        DecisionKind
+	Reason      string
+	Error       error
+	// RequestContext 仅用于 ModelRequestReady + Continue，替换本次模型请求上下文。
 	RequestContext *RequestContext
-	ToolArguments  *map[string]any
-	ToolContent    *[]llm.ContentBlock
+	// ToolArguments 仅用于 ToolStarting；Continue 替换执行参数，Skip/DeferRun 记录未执行的最终参数。
+	ToolArguments *map[string]any
+	// ToolContent 仅用于 ToolFinished + Continue，替换模型可见内容，保留原始结果。
+	ToolContent *[]llm.ContentBlock
+	// ContextMessages 是来源明确的宿主反馈，不冒充已消费的用户输入。
+	// 仅用于 RunEnding + Repeat 或 ToolBatchFinished + Continue，按给定顺序追加。
+	ContextMessages []llm.Message
 }
 
 var (
@@ -117,7 +134,7 @@ func (d *Driver) Next(ctx context.Context) (Checkpoint, error) {
 			if p.checkpoint.Kind == ToolStarting {
 				if reason := p.scheduler.startPermissionLocked(); reason != "" {
 					delete(a.pendingCheckpoints, p.checkpoint.ID)
-					p.done <- Decision{Kind: Skip, Reason: reason}
+					p.done <- Decision{Kind: Skip, Reason: reason, Disposition: ToolSkipped}
 					a.mu.Unlock()
 					continue
 				}
@@ -152,10 +169,14 @@ func (d *Driver) Resolve(ctx context.Context, id CheckpointID, decision Decision
 	}
 	valid := decision.Kind == Continue && decision.Error == nil && decision.Reason == "" ||
 		decision.Kind == Skip && p.checkpoint.Kind == ToolStarting && decision.Reason != "" && decision.Error == nil ||
-		decision.Kind == Stop && decision.Error != nil
+		decision.Kind == Stop && decision.Error != nil ||
+		decision.Kind == Repeat && p.checkpoint.Kind == RunEnding && decision.Error == nil && len(decision.ContextMessages) > 0 ||
+		decision.Kind == DeferRun && p.checkpoint.Kind == ToolStarting && decision.Error == nil && decision.Reason != ""
 	valid = valid && (decision.RequestContext == nil || decision.Kind == Continue && p.checkpoint.Kind == ModelRequestReady) &&
-		(decision.ToolArguments == nil || decision.Kind == Continue && p.checkpoint.Kind == ToolStarting) &&
-		(decision.ToolContent == nil || decision.Kind == Continue && p.checkpoint.Kind == ToolFinished)
+		(decision.ToolArguments == nil || (decision.Kind == Continue || decision.Kind == Skip || decision.Kind == DeferRun) && p.checkpoint.Kind == ToolStarting) &&
+		(decision.ToolContent == nil || decision.Kind == Continue && p.checkpoint.Kind == ToolFinished) &&
+		(len(decision.ContextMessages) == 0 || decision.Kind == Repeat && p.checkpoint.Kind == RunEnding || decision.Kind == Continue && p.checkpoint.Kind == ToolBatchFinished)
+	valid = valid && (decision.Disposition == "" || decision.Kind == Skip && (decision.Disposition == ToolDenied || decision.Disposition == ToolSkipped || decision.Disposition == ToolCanceled))
 	if !valid {
 		a.mu.Unlock()
 		return ErrDecision
@@ -172,9 +193,16 @@ func (d *Driver) Resolve(ctx context.Context, id CheckpointID, decision Decision
 		}
 		a.currentRun.cancel()
 	}
+	if decision.Kind == DeferRun && a.currentRun.ctx.Err() == nil {
+		a.currentRun.deferred = decision.Reason
+		a.currentRun.cancel()
+	}
+	if decision.Kind == Repeat && a.currentRun.ctx.Err() != nil {
+		decision = Decision{Kind: Continue}
+	}
 	if p.checkpoint.Kind == ToolStarting && decision.Kind == Continue {
 		if reason := p.scheduler.startPermissionLocked(); reason != "" {
-			decision = Decision{Kind: Skip, Reason: reason}
+			decision = Decision{Kind: Skip, Reason: reason, Disposition: ToolSkipped, ToolArguments: decision.ToolArguments}
 		}
 	}
 	delete(a.pendingCheckpoints, id)

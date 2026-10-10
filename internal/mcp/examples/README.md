@@ -41,27 +41,29 @@ _ = result
 
 ## 渐进式工具目录
 
-`Catalog` 是独立的本地发现目录。调用方显式调用 `Client.ListTools`，再用 `Update(serverID, tools)` 替换该服务器的整份快照；`Remove(serverID)` 移除来源。目录不会联网、启动服务器、监听通知或自动更新，不提供调用与授权能力。
+`Manager` 为每个服务器维护独立的本地工具目录，连接成功或刷新成功后发布完整快照。`Search` 只检索已就绪服务器的本地目录，不联网、不执行工具，也不复制第二份目录。断连、关闭或刷新失败时，该服务器的工具会从可见目录撤下。
 
 ```go
-var catalog mcp.Catalog // 零值可用；可并发调用，使用后不要复制。
-if err := catalog.Update(c.ID(), tools); err != nil { return err }
-candidates, err := catalog.Search("查找文件", 5)
+// manager 为已经 Start 的 *mcp.Manager。
+candidates, err := manager.Search("查找文件", 5)
 if err != nil { return err }
 if len(candidates) > 0 {
-    definition, err := catalog.Get(candidates[0].Key)
+    definitions, err := manager.Definitions()
     if err != nil { return err }
-    _ = definition // 按需取得完整 SDK 定义，未来由 Runtime 决定如何装载。
+    for _, definition := range definitions {
+        if definition.Key == candidates[0].Key {
+            _ = definition // 完整 SDK 定义及连接代次/目录版本，供上层装载或适配。
+            break
+        }
+    }
 }
-// catalog.Remove(c.ID())
 ```
 
-`ToolKey{ServerID, Name}` 保留来源 ID 与原工具名，不拼接字符串。不同来源允许同名；同来源重名、空工具或无法复制的定义会使整次 `Update` 失败，旧快照保持不变。快照更新只影响对应来源，空列表清空其工具。`Get` 查询不存在的键时可用 `errors.Is(err, mcp.ErrToolNotFound)` 判断。
+`ToolKey{ServerID, Name}` 保留来源 ID 与原工具名，不拼接字符串。不同来源允许同名；同来源重名、空工具或无法复制的定义会使目录构建失败。发布前完成校验，失败不会部分替换旧快照；管理器的刷新失败处理仍会撤下该服务器工具并标为 failed。成功更新只影响对应来源，空列表清空其工具。`Manager.CallTool` 检查当前目录是否存在工具，缺失时可用 `errors.Is(err, mcp.ErrToolNotFound)` 判断。
 
-`Search(query, limit)` 只索引名称、完整简介和来源，不索引 schema、标题或元数据。忽略大小写，按 Unicode 字母/数字分词，支持连续中文子串；多个关键词任一命中即可。评分只取最高命中等级：完整名称精确 600、完整名称前缀 500、名称分词 400、名称子串 300、简介子串 200、来源子串 100。同分按原始 `ServerID`、`Name` 升序排列。空白查询返回同样稳定排序的目录（评分为零）；`limit` 必须为 1–100，没有隐式默认值。候选只有结构化键、简介和评分，简介最多 200 个 Unicode 字符，完整 schema 只从 `Get` 返回。
+`Manager.Search(query, limit)` 只索引名称、完整简介和来源，不索引 schema、标题或元数据。忽略大小写，按 Unicode 字母/数字分词，支持连续中文子串；多个关键词任一命中即可。评分只取最高命中等级：完整名称精确 600、完整名称前缀 500、名称分词 400、名称子串 300、简介子串 200、来源子串 100。同分按原始 `ServerID`、`Name` 升序排列。空白查询返回同样稳定排序的目录（评分为零）；`limit` 必须为 1–100，没有隐式默认值。候选只有结构化键、简介和评分，简介最多 200 个 Unicode 字符。`Manager.Definitions()` 返回当前就绪服务器的完整定义列表，上层可按候选键筛选；它不是按键单条获取接口。
 
-目录在更新时序列化完整定义并保存独立 JSON 副本，`Get` 每次解码为独立的 SDK `Tool`。注解、图标、元数据、输入和输出 schema 均保留；schema 和元数据使用 JSON 原生 map/slice 等值，数字为 `json.Number`，不会在复制中转成 `float64`。`json.RawMessage` 或自定义 Go schema 类型会转换为 JSON 原生值，不保留其自定义 Go 类型；输入已经发生的精度损失无法恢复。调用方不得在 `Update` 进行期间并发修改输入，调用结束后修改输入或返回值不会改变目录。
-
+目录在发布时序列化完整定义并保存独立 JSON 副本，`Definitions` 每次读取并解码为独立的 SDK `Tool`。注解、图标、元数据、输入和输出 schema 均保留；schema 和元数据使用 JSON 原生 map/slice 等值，数字为 `json.Number`，不会在复制中转成 `float64`。`json.RawMessage` 或自定义 Go schema 类型会转换为 JSON 原生值，不保留其自定义 Go 类型；输入已经发生的精度损失无法恢复。修改返回定义及其嵌套字段不会改变已发布目录。
 这是渐进式工具目录机制。实际模型的按需装载需要未来 Runtime 配合，本轮未接入，因此不会减少当前模型请求的实际 token。这里借鉴 Amadeus `catalogs.go` / `lazy_tool.go` 的发现与执行边界、Pi `ai/deferred_tools.go` 的延迟定义装载边界，不引入它们的 Runtime、调用或审批框架。
 
 范围外：Resources、Prompts、OAuth 登录 UI、服务器安装、未配置服务器启动、自动审批和 Runtime 接入。

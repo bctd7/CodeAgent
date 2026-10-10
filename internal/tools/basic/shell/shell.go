@@ -17,7 +17,7 @@ import (
 
 	"CodeAgent/internal/agent"
 	"CodeAgent/internal/llm"
-	"CodeAgent/internal/tools/basic/common"
+	"CodeAgent/internal/tools/internal/output"
 )
 
 const (
@@ -55,7 +55,7 @@ func (e *shellError) Unwrap() error {
 
 type OutputSnapshot struct {
 	Content        string
-	Truncation     common.TruncateResult
+	Truncation     output.TruncateResult
 	FullOutputPath string
 	LastLineBytes  int
 }
@@ -190,7 +190,7 @@ func createShellTool(absWd, toolName, description string) agent.Tool {
 			cmd.WaitDelay = pipeWaitDelay
 
 			prefix := "codeagent-" + toolName + "-"
-			acc := newOutputAccumulator(prefix, common.DefaultMaxLines, common.DefaultMaxBytes)
+			acc := newOutputAccumulator(prefix, output.DefaultMaxLines, output.DefaultMaxBytes)
 			tracker := newProgressTracker(acc, onProgress, progressInterval)
 
 			writer := &shellOutputWriter{acc: acc, tracker: tracker}
@@ -339,15 +339,15 @@ func formatShellOutput(snapshot OutputSnapshot, acc *OutputAccumulator, emptyTex
 			logPath = fmt.Sprintf("%s (注意: 临时日志保存失败: %v，内容可能不完整)", logPath, acc.tempFileErr)
 		}
 		if trunc.LastLinePartial {
-			lastLineSize := common.FormatSize(snapshot.LastLineBytes)
+			lastLineSize := output.FormatSize(snapshot.LastLineBytes)
 			text += fmt.Sprintf("\n\n[Showing last %s of line %d (line is %s). Full output: %s]",
-				common.FormatSize(trunc.OutputBytes), endLine, lastLineSize, logPath)
+				output.FormatSize(trunc.OutputBytes), endLine, lastLineSize, logPath)
 		} else if trunc.TruncatedBy == "lines" {
 			text += fmt.Sprintf("\n\n[Showing lines %d-%d of %d. Full output: %s]",
 				startLine, endLine, trunc.TotalLines, logPath)
 		} else {
 			text += fmt.Sprintf("\n\n[Showing lines %d-%d of %d (%s limit). Full output: %s]",
-				startLine, endLine, trunc.TotalLines, common.FormatSize(acc.maxBytes), logPath)
+				startLine, endLine, trunc.TotalLines, output.FormatSize(acc.maxBytes), logPath)
 		}
 	}
 	return text
@@ -371,10 +371,10 @@ func splitIncompleteUTF8(b []byte) (valid []byte, leftover []byte) {
 
 func newOutputAccumulator(prefix string, maxLines, maxBytes int) *OutputAccumulator {
 	if maxLines <= 0 {
-		maxLines = common.DefaultMaxLines
+		maxLines = output.DefaultMaxLines
 	}
 	if maxBytes <= 0 {
-		maxBytes = common.DefaultMaxBytes
+		maxBytes = output.DefaultMaxBytes
 	}
 	maxRollingBytes := maxBytes * 2
 	if maxRollingBytes < 1 {
@@ -560,7 +560,7 @@ func (acc *OutputAccumulator) Snapshot(persistIfTruncated bool) OutputSnapshot {
 		acc.ensureTempFileLocked()
 	}
 
-	tailTruncation := truncateTail(acc.tailText, common.TruncateOptions{
+	tailTruncation := truncateTail(acc.tailText, output.TruncateOptions{
 		MaxLines: acc.maxLines,
 		MaxBytes: acc.maxBytes,
 	})
@@ -666,22 +666,22 @@ func truncateStringToBytesFromEnd(str string, maxBytes int) string {
 // truncateTail 保留文本末尾的内容，适用于 Shell 命令输出等查看尾部日志的场景。
 // 统一默认文本上限为 2000 行、50 KiB，先达到者生效。
 // 仅保留完整行，除非末行单行即超过字节上限，此时截取末尾部分并置 LastLinePartial 为 true。
-func truncateTail(content string, opts common.TruncateOptions) common.TruncateResult {
+func truncateTail(content string, opts output.TruncateOptions) output.TruncateResult {
 	maxLines := opts.MaxLines
 	if maxLines <= 0 {
-		maxLines = common.DefaultMaxLines
+		maxLines = output.DefaultMaxLines
 	}
 	maxBytes := opts.MaxBytes
 	if maxBytes <= 0 {
-		maxBytes = common.DefaultMaxBytes
+		maxBytes = output.DefaultMaxBytes
 	}
 
 	totalBytes := len(content)
-	lines := common.SplitLinesForCounting(content)
+	lines := output.SplitLinesForCounting(content)
 	totalLines := len(lines)
 
 	if totalLines <= maxLines && totalBytes <= maxBytes {
-		return common.TruncateResult{
+		return output.TruncateResult{
 			Content:     content,
 			Truncated:   false,
 			TruncatedBy: "",
@@ -729,7 +729,7 @@ func truncateTail(content string, opts common.TruncateOptions) common.TruncateRe
 	}
 
 	outputContent := strings.Join(collected, "\n")
-	return common.TruncateResult{
+	return output.TruncateResult{
 		Content:         outputContent,
 		Truncated:       true,
 		TruncatedBy:     truncatedBy,

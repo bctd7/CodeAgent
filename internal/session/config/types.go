@@ -92,18 +92,23 @@ type RunDetail struct {
 	TotalUsage     llm.Usage       `json:"total_usage"`
 }
 
-// Entry 是会话树中一条已提交的原始记录，提交后不原地改写。
+// Entry 是会话树中的记录；原始 Message 不改写，工具处理结果单独确认一次。
 // ParentID 决定分支路径；Sequence 只表示会话内的写入顺序，不能据此拼接所有分支。
 // Message 使用 LLM 消息类型；持久化编解码负责按角色恢复具体类型。
 type Entry struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"session_id"`
-	ParentID  string    `json:"parent_id,omitempty"` // 根记录为空；非空时必须指向同一会话的已有记录。
-	Sequence  int64     `json:"sequence"`            // 会话当中的实际写入顺序
-	RunID     string    `json:"run_id"`
-	CreatedAt time.Time `json:"created_at"`
+	Kind           EntryKind          `json:"kind"`
+	SourceKind     string             `json:"source_kind,omitempty"`
+	SourceID       string             `json:"source_id,omitempty"`
+	Processing     ProcessingState    `json:"processing"`
+	VisibleContent []llm.ContentBlock `json:"visible_content,omitempty"`
+	ID             string             `json:"id"`
+	SessionID      string             `json:"session_id"`
+	ParentID       string             `json:"parent_id,omitempty"` // 根记录为空；非空时必须指向同一会话的已有记录。
+	Sequence       int64              `json:"sequence"`            // 会话当中的实际写入顺序
+	RunID          string             `json:"run_id"`
+	CreatedAt      time.Time          `json:"created_at"`
 
-	// 保存消息事实，不保存请求准备阶段补出的工具结果或过滤后的消息。
+	// Message 保存原始消息或有明确来源的宿主上下文；不保存 Agent 准备阶段补出的消息。
 	// 已消费的引导也作为一条 UserMessage 按实际发生顺序追加。
 	Message llm.Message `json:"message"`
 	// assistant 必须记录实际请求来源；用户消息与工具结果不重复填写。
@@ -116,19 +121,22 @@ type Entry struct {
 
 // ToolExecution 记录工具的执行事实，不是完整运行事件流。
 // (AssistantEntryID, ToolCallID) 唯一定位一次调用；不能假设 ToolCallID 全局唯一。
-// 工具名取自所属 assistant；Arguments 保存最终参数，旧记录为 nil 时取原参数。
+// 工具名取自所属 assistant；Arguments 保存最终参数。
 // 最终内容及 IsError 取自 ResultEntryID。
 // 启动记录先提交，再调用工具；因此它不证明副作用已经发生。
 // 完成时结果记录与 FinishedAt/ResultEntryID 应在同一事务内提交。
 // 有启动记录而无结果时只能判定结果不明，不能自动重试。
 type ToolExecution struct {
-	// nil 表示旧记录，此时使用原始 assistant 消息中的参数。
+	Status       ToolStatus `json:"status"`
+	Executed     *bool      `json:"executed,omitempty"`
+	ErrorMessage string     `json:"error_message,omitempty"`
+	// Arguments 保存最终参数；启动及结果入口均要求调用方明确传入。
 	Arguments        *map[string]any `json:"arguments,omitempty"`
 	SessionID        string          `json:"session_id"`
 	RunID            string          `json:"run_id"`
 	AssistantEntryID string          `json:"assistant_entry_id"`
 	ToolCallID       string          `json:"tool_call_id"`
-	StartedAt        time.Time       `json:"started_at"`
+	StartedAt        *time.Time      `json:"started_at,omitempty"`
 	FinishedAt       *time.Time      `json:"finished_at,omitempty"`
 	ResultEntryID    string          `json:"result_entry_id,omitempty"`
 }
@@ -160,5 +168,5 @@ const (
 	RunStateSuccess  RunState = "success"
 	RunStateError    RunState = "error"
 	RunStateAborted  RunState = "aborted"
-	RunStateDeferred RunState = "deferred" // 与现有 Agent 对齐，本阶段不主动产生。
+	RunStateDeferred RunState = "deferred" // 宿主延期，结束本次任务，不自动重放。
 )

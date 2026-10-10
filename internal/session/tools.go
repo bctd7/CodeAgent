@@ -77,7 +77,8 @@ func (s *Session) RecordToolStart(ctx context.Context, assistantEntryID, toolCal
 			AssistantEntryID: assistantEntryID,
 			ToolCallID:       toolCallID,
 			Arguments:        &arguments,
-			StartedAt:        now,
+			StartedAt:        &now,
+			Status:           config.ToolStarted,
 			FinishedAt:       nil,
 			ResultEntryID:    "",
 		}
@@ -94,7 +95,11 @@ func (s *Session) RecordToolStart(ctx context.Context, assistantEntryID, toolCal
 // AppendToolResult 追加工具执行结果消息。
 // 调用期间借用只读消息；返回 Entry 共享该消息，调用方不得修改。
 // 验证调用配对、会话和 Run 归属及未结束状态，禁止重复结果。
-func (s *Session) AppendToolResult(ctx context.Context, assistantEntryID string, resultMsg *llm.ToolResultMessage) (config.Entry, error) {
+func (s *Session) AppendToolResult(ctx context.Context, assistantEntryID string, input config.ToolResultInput) (config.Entry, error) {
+	resultMsg := input.Result
+	if err := validateToolResult(input); err != nil {
+		return config.Entry{}, err
+	}
 	if assistantEntryID == "" {
 		return config.Entry{}, fmt.Errorf("assistantEntryID 不能为空")
 	}
@@ -129,6 +134,11 @@ func (s *Session) AppendToolResult(ctx context.Context, assistantEntryID string,
 		assistant, err := s.loadToolCall(ctx, tx, assistantEntryID, resultMsg.ToolCallID)
 		if err != nil {
 			return err
+		}
+		for _, call := range assistant.Message.(*llm.AssistantMessage).Content {
+			if call.Type == llm.TypeToolCall && call.ID == resultMsg.ToolCallID && call.Name != resultMsg.ToolName {
+				return fmt.Errorf("工具结果名称与所属调用不一致: %w", config.ErrToolResultConflict)
+			}
 		}
 		runID := assistant.RunID
 
@@ -188,6 +198,8 @@ func (s *Session) AppendToolResult(ctx context.Context, assistantEntryID string,
 			RunID:            runID,
 			CreatedAt:        now,
 			Message:          resultMsg,
+			Kind:             config.MessageEntry,
+			Processing:       config.ProcessingPending,
 			Origin:           nil,
 			AssistantEntryID: assistantEntryID,
 			ToolCallID:       resultMsg.ToolCallID,
@@ -197,10 +209,20 @@ func (s *Session) AppendToolResult(ctx context.Context, assistantEntryID string,
 			return fmt.Errorf("写入工具结果 config.Entry: %w", err)
 		}
 
-		if hasStartRecord {
-			if err := tx.UpdateToolExecutionResult(ctx, assistantEntryID, resultMsg.ToolCallID, entryID, now); err != nil {
+		if input.Executed && !hasStartRecord {
+			return fmt.Errorf("已执行结果缺少启动记录: %w", config.ErrSessionConflict)
+		}
+		if !hasStartRecord {
+			args := input.Arguments
+			te := config.ToolExecution{SessionID: s.sessionID, RunID: runID, AssistantEntryID: assistantEntryID, ToolCallID: resultMsg.ToolCallID, Arguments: &args, Status: input.Status}
+			if err := tx.InsertToolExecution(ctx, te); err != nil {
 				return err
 			}
+		} else if err := tx.MatchToolArguments(ctx, assistantEntryID, resultMsg.ToolCallID, input.Arguments); err != nil {
+			return err
+		}
+		if err := tx.UpdateToolExecutionResult(ctx, assistantEntryID, resultMsg.ToolCallID, entryID, now, input); err != nil {
+			return err
 		}
 
 		if err := tx.UpdateRunLastEntry(ctx, runID, entryID); err != nil {
@@ -249,4 +271,27 @@ func (s *Session) loadToolCall(ctx context.Context, tx *store.Tx, assistantEntry
 	}
 
 	return assistant, nil
+}
+
+func validateToolResult(input config.ToolResultInput) error {
+	if input.Result == nil {
+		return fmt.Errorf("tool result required")
+	}
+	switch input.Status {
+	case config.ToolSucceeded, config.ToolFailed:
+		if !input.Executed {
+			return fmt.Errorf("成功或失败执行结果必须标明已执行")
+		}
+	case config.ToolDenied, config.ToolUnavailable, config.ToolSkipped, config.ToolDeferred:
+		if input.Executed {
+			return fmt.Errorf("未执行状态不能标明已执行")
+		}
+	case config.ToolCanceled:
+	default:
+		return fmt.Errorf("非法工具终态 %q", input.Status)
+	}
+	if (input.Status == config.ToolSucceeded) == input.Result.IsError {
+		return fmt.Errorf("工具终态与 IsError 不一致")
+	}
+	return nil
 }

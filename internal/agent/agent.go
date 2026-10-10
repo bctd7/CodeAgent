@@ -29,6 +29,8 @@ type Agent struct {
 	toolsList    []llm.Tool
 	// 工具并发上限
 	maxParallelTools int
+	maxQueuedRuns    int
+	maxSteers        int
 
 	// 模型配置及待生效切换
 	currentModel   llm.Model
@@ -68,6 +70,15 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.MaxParallelTools < 0 {
 		return nil, fmt.Errorf("MaxParallelTools 不能为负数: %d", cfg.MaxParallelTools)
 	}
+	if cfg.MaxQueuedRuns < 0 || cfg.MaxSteers < 0 {
+		return nil, fmt.Errorf("队列上限不能为负数")
+	}
+	if cfg.MaxQueuedRuns == 0 {
+		cfg.MaxQueuedRuns = 128
+	}
+	if cfg.MaxSteers == 0 {
+		cfg.MaxSteers = 128
+	}
 
 	maxParallelTools := cfg.MaxParallelTools
 	if maxParallelTools == 0 {
@@ -87,15 +98,16 @@ func New(cfg Config) (*Agent, error) {
 		tools:            toolMap,
 		toolsList:        llmTools,
 		maxParallelTools: maxParallelTools,
-		currentModel:     cfg.Model,
-		currentOptions:   cfg.Options,
-		status:           AgentStatusIdle,
-		history:          copyHistory(cfg.InitialHistory),
-		messageOrigin:    make(map[*llm.AssistantMessage]ModelOrigin),
-		queue:            make([]*queuedRun, 0),
-		workNotify:       make(chan struct{}, 1),
-		done:             make(chan struct{}),
-		dispatcher:       newEventDispatcher(cfg.OnEvent),
+		maxQueuedRuns:    cfg.MaxQueuedRuns, maxSteers: cfg.MaxSteers,
+		currentModel:   cfg.Model,
+		currentOptions: cfg.Options,
+		status:         AgentStatusIdle,
+		history:        copyHistory(cfg.InitialHistory),
+		messageOrigin:  make(map[*llm.AssistantMessage]ModelOrigin),
+		queue:          make([]*queuedRun, 0),
+		workNotify:     make(chan struct{}, 1),
+		done:           make(chan struct{}),
+		dispatcher:     newEventDispatcher(cfg.OnEvent),
 	}
 	for msg, origin := range cfg.InitialOrigins {
 		a.messageOrigin[msg] = origin
@@ -130,6 +142,10 @@ func (a *Agent) Submit(ctx context.Context, message *llm.UserMessage) (*RunHandl
 	if !a.driverAttached {
 		a.mu.Unlock()
 		return nil, fmt.Errorf("Submit 前必须领取并运行 Driver")
+	}
+	if len(a.queue) >= a.maxQueuedRuns {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("任务队列已满（上限 %d）", a.maxQueuedRuns)
 	}
 	a.runCounter++
 	runID := fmt.Sprintf("run_%d", a.runCounter)
@@ -170,6 +186,10 @@ func (a *Agent) Steer(message string) error {
 		return fmt.Errorf("没有活动的 Run，无法提交纠正")
 	}
 
+	if len(a.steerQueue) >= a.maxSteers {
+		a.mu.Unlock()
+		return fmt.Errorf("纠正队列已满（上限 %d）", a.maxSteers)
+	}
 	a.steerQueue = append(a.steerQueue, message)
 	runID := a.currentRun.id
 	a.dispatcher.enqueue(Event{
@@ -239,7 +259,7 @@ func (a *Agent) WithExecutionBoundary(ctx context.Context, idle bool, fn func() 
 	}
 	defer func() { <-a.boundary }()
 	a.mu.Lock()
-	closed, active, fault := a.status == AgentStatusClosed, a.currentRun != nil, a.executionErr
+	closed, active, fault := a.status == AgentStatusClosed, a.currentRun != nil || len(a.queue) != 0, a.executionErr
 	a.mu.Unlock()
 	if closed {
 		return fmt.Errorf("Agent 已关闭")
@@ -251,6 +271,23 @@ func (a *Agent) WithExecutionBoundary(ctx context.Context, idle bool, fn func() 
 		return fmt.Errorf("存在活动 Run，无法执行空闲管理操作")
 	}
 	return fn()
+}
+
+// StopAll 取消当前任务并丢弃独立排队项；实例仍可接受之后提交的新任务。
+func (a *Agent) StopAll() {
+	a.mu.Lock()
+	var runID string
+	if a.currentRun != nil && !a.currentRun.finishing {
+		runID = a.currentRun.id
+		a.currentRun.cancel()
+		a.status = AgentStatusCancelling
+	}
+	dropped := a.dropAllQueuedLocked("会话已停止，排队任务未执行")
+	steers := a.steerQueue
+	a.steerQueue = nil
+	a.mu.Unlock()
+	a.notifyDroppedTasks(dropped)
+	a.notifyDroppedSteers(runID, steers)
 }
 
 // Snapshot 读取当前状态、历史和排队概况的只读快照。

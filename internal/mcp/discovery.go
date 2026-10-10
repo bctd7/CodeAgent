@@ -5,36 +5,38 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"sort"
+	"strings"
 )
 
-// publish 在持有 m.mu 且检查代次后调用；Catalog 不承担连接职责。
+// publish 在持有 m.mu 且检查代次后替换该服务器目录。
 func (m *Manager) publish(e *serverEntry, tools []*Tool) error {
 	ordered := append([]*Tool(nil), tools...)
 	for _, t := range ordered {
 		if t == nil {
-			return errors.New("nil MCP tool")
+			return protocolError(e.spec.ID, "discover", "nil MCP tool")
 		}
 	}
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name < ordered[j].Name })
 	encoded, err := json.Marshal(ordered)
 	if err != nil {
-		return err
+		return operationError(e.spec.ID, "discover", err)
 	}
 	marked := make([]string, 0)
 	for _, tool := range ordered {
 		has, err := schemaHasHeader(tool.InputSchema)
 		if err != nil {
-			return err
+			return operationError(e.spec.ID, "discover", err)
 		}
 		if has {
 			marked = append(marked, tool.Name)
 		}
 	}
-	if err := m.catalog.Update(e.spec.ID, ordered); err != nil {
+	directory, err := newToolDirectory(e.spec.ID, ordered)
+	if err != nil {
 		return err
 	}
+	e.tools = directory
 	for _, name := range marked {
 		e.headerTools[name] = true
 	}
@@ -62,7 +64,7 @@ func (m *Manager) watch(e *serverEntry, c *Client, generation uint64, life conte
 				e.status.State = ServerDisconnected
 				e.status.Error = safeError(err)
 				e.status.ToolCount = 0
-				m.catalog.Remove(e.spec.ID)
+				e.tools = nil
 			}
 			m.mu.Unlock()
 			_ = c.Close()
@@ -91,7 +93,7 @@ func (m *Manager) Refresh(ctx context.Context, id string) error {
 
 func (m *Manager) refresh(ctx context.Context, e *serverEntry, expected uint64) error {
 	if err := m.lockOperation(ctx, e); err != nil {
-		return &ServerError{e.spec.ID, "refresh", err}
+		return operationError(e.spec.ID, "refresh", err)
 	}
 	defer func() { <-e.opGate }()
 	m.mu.RLock()
@@ -125,8 +127,8 @@ func (m *Manager) refresh(ctx context.Context, e *serverEntry, expected uint64) 
 		e.status.State = ServerFailed
 		e.status.Error = safeError(err)
 		e.status.ToolCount = 0
-		m.catalog.Remove(e.spec.ID)
-		return &ServerError{e.spec.ID, "refresh", err}
+		e.tools = nil
+		return operationError(e.spec.ID, "refresh", err)
 	}
 	e.status.State = ServerReady
 	return nil
@@ -138,22 +140,58 @@ func (m *Manager) Definitions() ([]Definition, error) {
 	if m.closed {
 		return nil, ErrManagerClosed
 	}
-	keys := m.catalog.Keys()
-	defs := make([]Definition, 0, len(keys))
-	for _, key := range keys {
-		e := m.entries[key.ServerID]
+	defs := make([]Definition, 0)
+	for serverID, e := range m.entries {
 		if e.status.State != ServerReady {
 			continue
 		}
-		tool, err := m.catalog.Get(key)
-		if err != nil {
-			return nil, err
+		for name := range e.tools {
+			tool, err := e.tools.get(name)
+			if err != nil {
+				return nil, operationError(serverID, "discover", err)
+			}
+			reason := ""
+			if e.headerTools[name] {
+				reason = ErrUnsupportedTool.Error()
+			}
+			defs = append(defs, Definition{Key: ToolKey{serverID, name}, Tool: tool, Generation: e.status.Generation, Revision: e.status.Revision, UnsupportedReason: reason})
 		}
-		reason := ""
-		if e.headerTools[key.Name] {
-			reason = ErrUnsupportedTool.Error()
-		}
-		defs = append(defs, Definition{Key: key, Tool: tool, Generation: e.status.Generation, Revision: e.status.Revision, UnsupportedReason: reason})
 	}
+	sort.Slice(defs, func(i, j int) bool {
+		if defs[i].Key.ServerID != defs[j].Key.ServerID {
+			return defs[i].Key.ServerID < defs[j].Key.ServerID
+		}
+		return defs[i].Key.Name < defs[j].Key.Name
+	})
 	return defs, nil
+}
+
+// Search 汇总就绪服务器的本地目录，不请求远端或复制另一份目录。
+// 只检索名称、简介和来源，忽略大小写；limit 必须为 1..MaxCatalogResults。
+// 空查询列出目录；非空查询按关键词任一命中选取，连续中文支持子串匹配。
+// 名称精确、前缀、分词、子串依次优先，随后是简介、来源；同分按来源和原名排序。
+// 候选简介最多 200 个 Unicode 字符，索引仍使用完整简介，结果不含 schema。
+func (m *Manager) Search(query string, limit int) ([]Candidate, error) {
+	if limit < 1 || limit > MaxCatalogResults {
+		return nil, inputError("", "catalog/search", "MCP 目录 limit 必须为 1..%d", MaxCatalogResults)
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
+	words := catalogWords(query)
+	candidates := make([]Candidate, 0)
+	m.mu.RLock()
+	if m.closed {
+		m.mu.RUnlock()
+		return nil, ErrManagerClosed
+	}
+	for serverID, e := range m.entries {
+		if e.status.State == ServerReady {
+			candidates = e.tools.candidates(candidates, serverID, query, words)
+		}
+	}
+	m.mu.RUnlock()
+	sortCandidates(candidates)
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	return candidates, nil
 }

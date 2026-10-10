@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"CodeAgent/internal/llm"
@@ -82,46 +83,33 @@ func convertResult(result *mcpcore.CallToolResult) ([]llm.ContentBlock, error) {
 
 func modelVisible(content sdk.Content) bool {
 	// 受众提示用于模型投影；缺省受众可见，明确受众须包含 assistant。
-	if content == nil {
-		return true
-	}
 	var annotations *sdk.Annotations
 	switch c := content.(type) {
 	case *sdk.TextContent:
-		if c == nil {
-			return true
+		if c != nil {
+			annotations = c.Annotations
 		}
-		annotations = c.Annotations
 	case *sdk.ImageContent:
-		if c == nil {
-			return true
+		if c != nil {
+			annotations = c.Annotations
 		}
-		annotations = c.Annotations
 	case *sdk.AudioContent:
-		if c == nil {
-			return true
+		if c != nil {
+			annotations = c.Annotations
 		}
-		annotations = c.Annotations
 	case *sdk.ResourceLink:
-		if c == nil {
-			return true
+		if c != nil {
+			annotations = c.Annotations
 		}
-		annotations = c.Annotations
 	case *sdk.EmbeddedResource:
-		if c == nil {
-			return true
+		if c != nil {
+			annotations = c.Annotations
 		}
-		annotations = c.Annotations
 	}
 	if annotations == nil || len(annotations.Audience) == 0 {
 		return true
 	}
-	for _, role := range annotations.Audience {
-		if role == "assistant" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(annotations.Audience, "assistant")
 }
 
 func unsupportedResult(result *mcpcore.CallToolResult, index int, kind string) error {

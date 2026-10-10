@@ -8,9 +8,10 @@ import (
 	"strings"
 
 	"CodeAgent/internal/agent"
-	"CodeAgent/internal/tools/basic"
+	"CodeAgent/internal/tools/basic/edit"
 	"CodeAgent/internal/tools/basic/read"
 	"CodeAgent/internal/tools/basic/shell"
+	"CodeAgent/internal/tools/basic/write"
 )
 
 // Config 定义基础工具集合所需的运行配置。
@@ -50,7 +51,7 @@ func New(cfg Config) ([]agent.Tool, error) {
 	return []agent.Tool{
 		read.New(absWd),
 		shell.New(absWd),
-		basic.NewEdit(absWd),
-		basic.NewWrite(absWd),
+		edit.New(absWd),
+		write.New(absWd),
 	}, nil
 }

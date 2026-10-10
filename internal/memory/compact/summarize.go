@@ -3,7 +3,6 @@ package compact
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -14,15 +13,22 @@ import (
 // Summarize 显式执行计划，不判断自动触发阈值，不保存或应用摘要。
 func Summarize(ctx context.Context, plan Plan, options Options) (Result, error) {
 	var result Result
-	if ctx == nil || !plan.prepared {
-		return result, failure(InvalidInput, fmt.Errorf("context and a Prepare-generated plan are required"))
+	if ctx == nil {
+		return result, failure(InvalidInput, fmt.Errorf("context is required"))
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if !plan.Ready {
+	sources := plan.Input.Sources
+	if plan.HistoryEnd < 0 || plan.HistoryEnd > plan.FirstKeptIndex || plan.FirstKeptIndex < 0 ||
+		plan.FirstKeptIndex > 0 && plan.FirstKeptIndex >= len(sources) {
+		return result, failure(InvalidInput, fmt.Errorf("invalid plan boundaries"))
+	}
+	if plan.FirstKeptIndex == 0 {
 		return result, nil
 	}
+	historySources := sources[:plan.HistoryEnd]
+	turnPrefix := sources[plan.HistoryEnd:plan.FirstKeptIndex]
 	if options.Stream == nil || strings.TrimSpace(options.Model.ID) == "" || strings.TrimSpace(options.Model.Provider) == "" || options.Model.API == "" {
 		return result, failure(InvalidInput, fmt.Errorf("explicit model and stream are required"))
 	}
@@ -33,23 +39,20 @@ func Summarize(ctx context.Context, plan Plan, options Options) (Result, error) 
 	// 先准备两个请求，避免第二段已知超窗口时仍调用第一段。
 	var historyRequest, prefixRequest llm.Request
 	var err error
-	if len(plan.History) != 0 {
-		historyRequest, err = makeRequest(plan.History, plan.PreviousSummary, false, plan.Settings, options)
+	if len(historySources) != 0 {
+		historyRequest, err = makeRequest(historySources, plan.Input.PreviousSummary, false, plan.Input.Settings, options)
 		if err != nil {
 			return result, err
 		}
 	}
-	if plan.IsSplitTurn {
-		prefixRequest, err = makeRequest(plan.TurnPrefix, "", true, plan.Settings, options)
+	if len(turnPrefix) != 0 {
+		prefixRequest, err = makeRequest(turnPrefix, "", true, plan.Input.Settings, options)
 		if err != nil {
 			return result, err
 		}
 	}
-	if len(plan.History) == 0 && !plan.IsSplitTurn {
-		return result, failure(InvalidInput, fmt.Errorf("ready plan has no summary prefix"))
-	}
-	history := plan.PreviousSummary
-	if len(plan.History) != 0 {
+	history := plan.Input.PreviousSummary
+	if len(historySources) != 0 {
 		var usage llm.Usage
 		history, usage, err = callSummary(ctx, historyRequest, options.Stream)
 		result.Usage = usage
@@ -60,7 +63,7 @@ func Summarize(ctx context.Context, plan Plan, options Options) (Result, error) 
 		history = "No prior history."
 	}
 	summary := history
-	if plan.IsSplitTurn {
+	if len(turnPrefix) != 0 {
 		prefix, usage, err := callSummary(ctx, prefixRequest, options.Stream)
 		result.Usage = sumUsage(result.Usage, usage)
 		if err != nil {
@@ -72,8 +75,7 @@ func Summarize(ctx context.Context, plan Plan, options Options) (Result, error) 
 		return result, err
 	}
 	result.Compacted, result.Summary = true, summary
-	result.FirstKeptEntryID, result.FirstKeptIndex = plan.FirstKeptEntryID, plan.FirstKeptIndex
-	result.EstimatedTokensBefore = plan.EstimatedTokensBefore
+	result.FirstKeptIndex = plan.FirstKeptIndex
 	return result, nil
 }
 
@@ -119,7 +121,7 @@ func callSummary(ctx context.Context, request llm.Request, stream StreamFunc) (s
 		return "", llm.Usage{}, err
 	}
 	reader, err := stream(ctx, request)
-	if nilReader(reader) {
+	if reader == nil {
 		if cause := ctx.Err(); cause != nil {
 			return "", llm.Usage{}, cause
 		}
@@ -174,18 +176,6 @@ func callSummary(ctx context.Context, request llm.Request, stream StreamFunc) (s
 		return "", usage, failure(Rejected, fmt.Errorf("empty summary"))
 	}
 	return summary, usage, nil
-}
-
-func nilReader(reader llm.StreamReader) bool {
-	if reader == nil {
-		return true
-	}
-	v := reflect.ValueOf(reader)
-	switch v.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return v.IsNil()
-	}
-	return false
 }
 
 func sumUsage(a, b llm.Usage) llm.Usage {

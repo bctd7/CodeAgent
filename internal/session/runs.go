@@ -28,6 +28,16 @@ func (s *Session) SessionID() string {
 	return s.sessionID
 }
 
+// GetInfo 读取当前绑定会话的元数据，不改变目录、模型选择或历史位置。
+func (s *Session) GetInfo(ctx context.Context) (config.SessionInfo, error) {
+	return s.store.GetSession(ctx, s.sessionID)
+}
+
+// ListUnfinishedRuns 只查询当前会话的未结束任务，不推断旧执行者是否已经退出。
+func (s *Session) ListUnfinishedRuns(ctx context.Context) ([]config.RunRecord, error) {
+	return s.store.ListUnfinishedRuns(ctx, s.sessionID)
+}
+
 // StartRun 在当前会话开启一次新的任务。
 // 调用方提供非空、跨重启唯一的 RunID 和合法用户消息。
 func (s *Session) StartRun(ctx context.Context, runID string, userMsg *llm.UserMessage) (config.RunRecord, error) {
@@ -102,6 +112,7 @@ func (s *Session) StartRun(ctx context.Context, runID string, userMsg *llm.UserM
 			RunID:     runID,
 			CreatedAt: now,
 			Message:   userMsg,
+			Kind:      config.MessageEntry, Processing: config.ProcessingOriginal,
 		}
 		if err := tx.InsertEntry(ctx, entry, string(msgData), nil); err != nil {
 			return err
@@ -222,7 +233,8 @@ func (s *Session) AppendMessage(ctx context.Context, runID string, msg llm.Messa
 			RunID:     runID,
 			CreatedAt: now,
 			Message:   msg,
-			Origin:    origin,
+			Kind:      config.MessageEntry, Processing: config.ProcessingOriginal,
+			Origin: origin,
 		}
 
 		if err := tx.InsertEntry(ctx, entry, string(msgData), originData); err != nil {
@@ -292,7 +304,7 @@ func (s *Session) FinishRun(ctx context.Context, runID string, completion config
 		if completion.StopReason != "" && completion.StopReason != llm.StopSafety {
 			return config.RunRecord{}, fmt.Errorf("失败任务的结束原因无效: %q", completion.StopReason)
 		}
-	case config.RunStateAborted:
+	case config.RunStateAborted, config.RunStateDeferred:
 		if completion.StopReason != "" {
 			return config.RunRecord{}, fmt.Errorf("取消任务不能带结束原因: %q", completion.StopReason)
 		}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sort"
 	"sync"
 )
@@ -22,24 +21,19 @@ const (
 
 // ServerStatus 不包含端点、请求头、环境变量和原始错误。
 type ServerStatus struct {
-	ID                   string
-	State                ServerState
+	ID    string
+	State ServerState
+	//连接的版本，区分新旧连接
+	//工具目录的版本
 	Generation, Revision uint64
 	ToolCount            int
 	Error                string
 }
 
-// Definition 将复制的工具定义绑定到连接代次和目录版本。
-// 重连或定义变化后应重建适配器；调用期间不能修改定义。
-type Definition struct {
-	Key                  ToolKey
-	Tool                 *Tool
-	Generation, Revision uint64
-	UnsupportedReason    string
-}
-
+// 远程MCP在本地的记录
 type serverEntry struct {
 	spec        ServerConfig
+	tools       toolDirectory
 	opGate      chan struct{} // 串行连接/刷新，等待可取消
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -51,11 +45,10 @@ type serverEntry struct {
 }
 
 // Manager 只管理明确配置的服务；Start/Reconnect 不重放工具调用。
-// 管理器独占消费各 Client.ToolsChanged 通道；Catalog 仅负责本地存储。
+// 管理器独占消费各 Client.ToolsChanged 通道；工具目录归各服务器持有。
 type Manager struct {
 	mu              sync.RWMutex
 	entries         map[string]*serverEntry
-	catalog         Catalog
 	ctx             context.Context
 	cancel          context.CancelFunc
 	started, closed bool
@@ -75,7 +68,7 @@ func NewManager(specs []ServerConfig) (*Manager, error) {
 		}
 		if _, exists := m.entries[spec.ID]; exists {
 			cancel()
-			return nil, fmt.Errorf("duplicate MCP server ID %q", spec.ID)
+			return nil, inputError(spec.ID, "validate", "duplicate MCP server ID %q", spec.ID)
 		}
 		life, stop := context.WithCancel(ctx)
 		state := ServerDisabled
@@ -97,7 +90,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 	if m.started {
 		m.mu.Unlock()
-		return errors.New("MCP manager already started; use explicit Reconnect")
+		return ErrManagerStarted
 	}
 	m.started = true
 	var entries []*serverEntry
@@ -149,7 +142,7 @@ func (m *Manager) Reconnect(ctx context.Context, id string) error {
 
 func (m *Manager) connectServer(ctx context.Context, e *serverEntry, reopen bool) error {
 	if err := m.lockOperation(ctx, e); err != nil {
-		return &ServerError{e.spec.ID, "connect", err}
+		return operationError(e.spec.ID, "connect", err)
 	}
 	defer func() { <-e.opGate }()
 	m.mu.Lock()
@@ -171,14 +164,14 @@ func (m *Manager) connectServer(ctx context.Context, e *serverEntry, reopen bool
 	e.status.ToolCount = 0
 	e.status.Error = ""
 	e.headerTools = make(map[string]bool)
-	m.catalog.Remove(e.spec.ID)
+	e.tools = nil
 	e.ctx, e.cancel = context.WithCancel(m.ctx)
 	life := e.ctx
 	m.mu.Unlock()
 	if old != nil {
 		if err := old.Close(); err != nil {
 			m.failAttempt(e, generation, err)
-			return &ServerError{e.spec.ID, "close previous connection", err}
+			return operationError(e.spec.ID, "close previous connection", err)
 		}
 	}
 	// 此处不等待旧 watcher，避免它等待操作门产生死锁；代次检查使其退出。
@@ -195,7 +188,7 @@ func (m *Manager) connectServer(ctx context.Context, e *serverEntry, reopen bool
 	stop()
 	if err != nil {
 		m.failAttempt(e, generation, err)
-		return &ServerError{e.spec.ID, "connect", err}
+		return operationError(e.spec.ID, "connect", err)
 	}
 	listCtx, stopList := context.WithTimeout(operation, e.spec.RequestTimeout)
 	tools, err := c.ListTools(listCtx)
@@ -207,7 +200,7 @@ func (m *Manager) connectServer(ctx context.Context, e *serverEntry, reopen bool
 	if m.closed || e.status.Generation != generation || life.Err() != nil {
 		m.mu.Unlock()
 		_ = c.Close()
-		return &ServerError{e.spec.ID, "connect", context.Canceled}
+		return operationError(e.spec.ID, "connect", context.Canceled)
 	}
 	if err == nil {
 		err = m.publish(e, tools)
@@ -217,7 +210,7 @@ func (m *Manager) connectServer(ctx context.Context, e *serverEntry, reopen bool
 		e.status.Error = safeError(err)
 		m.mu.Unlock()
 		_ = c.Close()
-		return &ServerError{e.spec.ID, "discover", err}
+		return operationError(e.spec.ID, "discover", err)
 	}
 	e.client = c
 	e.status.State = ServerReady
@@ -227,26 +220,6 @@ func (m *Manager) connectServer(ctx context.Context, e *serverEntry, reopen bool
 	go m.watch(e, c, generation, life, done)
 	m.mu.Unlock()
 	return nil
-}
-
-func (m *Manager) failAttempt(e *serverEntry, generation uint64, err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.closed && e.status.Generation == generation && e.ctx.Err() == nil {
-		e.status.State = ServerFailed
-		e.status.Error = safeError(err)
-	}
-}
-
-func (m *Manager) Statuses() []ServerStatus {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	states := make([]ServerStatus, 0, len(m.entries))
-	for _, e := range m.entries {
-		states = append(states, e.status)
-	}
-	sort.Slice(states, func(i, j int) bool { return states[i].ID < states[j].ID })
-	return states
 }
 
 func (m *Manager) CallTool(ctx context.Context, definition Definition, args json.RawMessage) (*CallToolResult, error) {
@@ -268,9 +241,9 @@ func (m *Manager) CallTool(ctx context.Context, definition Definition, args json
 		m.mu.RUnlock()
 		return nil, ErrUnsupportedTool
 	}
-	if _, err := m.catalog.Get(definition.Key); err != nil {
+	if _, exists := e.tools[definition.Key.Name]; !exists {
 		m.mu.RUnlock()
-		return nil, err
+		return nil, operationError(definition.Key.ServerID, "tools/call", ErrToolNotFound)
 	}
 	c, life, timeout := e.client, e.ctx, e.spec.RequestTimeout
 	m.wg.Add(1)
@@ -280,11 +253,7 @@ func (m *Manager) CallTool(ctx context.Context, definition Definition, args json
 	defer cleanup()
 	operation, stop := context.WithTimeout(operation, timeout)
 	defer stop()
-	result, err := c.CallTool(operation, definition.Key.Name, args)
-	if err != nil {
-		return nil, &ServerError{definition.Key.ServerID, "tools/call", err}
-	}
-	return result, nil
+	return c.CallTool(operation, definition.Key.Name, args)
 }
 
 func (m *Manager) CloseServer(id string) error {
@@ -308,7 +277,7 @@ func (m *Manager) CloseServer(id string) error {
 	e.status.Error = ""
 	e.client = nil
 	e.watchDone = nil
-	m.catalog.Remove(id)
+	e.tools = nil
 	m.mu.Unlock()
 	var err error
 	if c != nil {
@@ -320,7 +289,7 @@ func (m *Manager) CloseServer(id string) error {
 		<-done
 	}
 	if err != nil {
-		return &ServerError{id, "close", err}
+		return operationError(id, "close", err)
 	}
 	return nil
 }
@@ -358,7 +327,7 @@ func (m *Manager) Close() error {
 			e.status.State = ServerClosed
 			e.status.ToolCount = 0
 			e.status.Error = ""
-			m.catalog.Remove(e.spec.ID)
+			e.tools = nil
 			if e.client != nil {
 				clients = append(clients, closing{e.spec.ID, e.client})
 			}
@@ -368,11 +337,31 @@ func (m *Manager) Close() error {
 		var errs []error
 		for _, c := range clients {
 			if err := c.client.Close(); err != nil {
-				errs = append(errs, &ServerError{c.id, "close", err})
+				errs = append(errs, operationError(c.id, "close", err, ErrorConnection))
 			}
 		}
 		m.wg.Wait()
 		m.closeErr = errors.Join(errs...)
 	})
 	return m.closeErr
+}
+
+func (m *Manager) failAttempt(e *serverEntry, generation uint64, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.closed && e.status.Generation == generation && e.ctx.Err() == nil {
+		e.status.State = ServerFailed
+		e.status.Error = safeError(err)
+	}
+}
+
+func (m *Manager) Statuses() []ServerStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	states := make([]ServerStatus, 0, len(m.entries))
+	for _, e := range m.entries {
+		states = append(states, e.status)
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i].ID < states[j].ID })
+	return states
 }

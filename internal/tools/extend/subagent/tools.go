@@ -21,7 +21,8 @@ func New(controller Controller) ([]agent.Tool, error) {
 			"properties":{
 				"task":{"type":"string","minLength":1,"description":"Task instructions"},
 				"role":{"type":"string","enum":["explore","worker"]},
-				"model_ref":{"type":"string","minLength":1,"description":"Optional configured model reference; omission inherits the current model"}
+				"model_ref":{"type":"string","minLength":1,"description":"Optional configured model reference; omission inherits the current model"},
+				"file_scope":{"type":"array","items":{"type":"string","minLength":1},"maxItems":256,"uniqueItems":true,"description":"Optional worker file paths, held for the entire child run; omission acquires paths on first modification"}
 			}, "required":["task","role"]
 		}`, controller.Spawn),
 		newTool("send_input", "Send instructions to your child task. Running tasks consume them at safe points; a finished task can continue with its existing context.", `{
@@ -32,7 +33,7 @@ func New(controller Controller) ([]agent.Tool, error) {
 		newTool("wait", "Wait for any or all specified child tasks to finish, fail or be cancelled. A timeout ends only this wait and leaves tasks running. Returns a snapshot for every requested ID.", fmt.Sprintf(`{
 			"type":"object", "additionalProperties":false,
 			"properties":{
-				"ids":{"type":"array","items":{"type":"string","minLength":1},"minItems":1,"uniqueItems":true},
+				"ids":{"type":"array","items":{"type":"string","minLength":1},"minItems":1,"maxItems":64,"uniqueItems":true},
 				"mode":{"type":"string","enum":["any","all"]},
 				"timeout_ms":{"type":"integer","minimum":1,"maximum":%d}
 			}, "required":["ids","mode","timeout_ms"]

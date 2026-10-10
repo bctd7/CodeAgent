@@ -32,6 +32,20 @@ func (tx *Tx) InsertEntry(ctx context.Context, ent config.Entry, msgJSON string,
 		tcVal = ent.ToolCallID
 	}
 
+	if ent.Kind == "" {
+		ent.Kind = config.MessageEntry
+	}
+	if ent.Processing == "" {
+		ent.Processing = config.ProcessingOriginal
+	}
+	var visible any
+	if ent.Processing == config.ProcessingReplaced {
+		data, err := json.Marshal(ent.VisibleContent)
+		if err != nil {
+			return err
+		}
+		visible = string(data)
+	}
 	createdAtStr := ent.CreatedAt.UTC().Format(time.RFC3339Nano)
 	_, err := tx.tx.ExecContext(
 		ctx,
@@ -46,6 +60,7 @@ func (tx *Tx) InsertEntry(ctx context.Context, ent config.Entry, msgJSON string,
 		originJSON,
 		asstVal,
 		tcVal,
+		ent.Kind, nullText(ent.SourceKind), nullText(ent.SourceID), ent.Processing, visible,
 	)
 	if err != nil {
 		return fmt.Errorf("写入 Entry: %w", err)
@@ -124,7 +139,10 @@ func (tx *Tx) InsertToolExecution(ctx context.Context, te config.ToolExecution) 
 		}
 		arguments = string(data)
 	}
-	startedStr := te.StartedAt.UTC().Format(time.RFC3339Nano)
+	var startedStr any
+	if te.StartedAt != nil {
+		startedStr = te.StartedAt.UTC().Format(time.RFC3339Nano)
+	}
 	_, err := tx.tx.ExecContext(
 		ctx,
 		sessql.InsertToolExecutionSQL,
@@ -133,7 +151,7 @@ func (tx *Tx) InsertToolExecution(ctx context.Context, te config.ToolExecution) 
 		te.AssistantEntryID,
 		te.ToolCallID,
 		startedStr,
-		arguments,
+		arguments, te.Status,
 	)
 	if err != nil {
 		return fmt.Errorf("插入工具启动记录: %w", err)
@@ -142,9 +160,9 @@ func (tx *Tx) InsertToolExecution(ctx context.Context, te config.ToolExecution) 
 }
 
 // UpdateToolExecutionResult 写入完成时间及结果 Entry ID，不判断业务上是否允许完成。
-func (tx *Tx) UpdateToolExecutionResult(ctx context.Context, assistantEntryID, toolCallID, resultEntryID string, finishedAt time.Time) error {
+func (tx *Tx) UpdateToolExecutionResult(ctx context.Context, assistantEntryID, toolCallID, resultEntryID string, finishedAt time.Time, input config.ToolResultInput) error {
 	nowStr := finishedAt.UTC().Format(time.RFC3339Nano)
-	res, err := tx.tx.ExecContext(ctx, sessql.UpdateToolExecutionFinishSQL, nowStr, resultEntryID, assistantEntryID, toolCallID)
+	res, err := tx.tx.ExecContext(ctx, sessql.UpdateToolExecutionFinishSQL, nowStr, resultEntryID, input.Status, input.Executed, input.ErrorMessage, assistantEntryID, toolCallID)
 	if err != nil {
 		return fmt.Errorf("更新工具执行完成记录: %w", err)
 	}
@@ -200,10 +218,11 @@ func (tx *Tx) ListToolExecutionsByRun(ctx context.Context, runID, sessionID stri
 	for rows.Next() {
 		var (
 			te            config.ToolExecution
-			startedAtRaw  string
+			startedAtRaw  sql.NullString
 			finishedAtRaw sql.NullString
 			resultEntryID sql.NullString
 			arguments     sql.NullString
+			executed      sql.NullBool
 		)
 
 		if err := rows.Scan(
@@ -214,7 +233,7 @@ func (tx *Tx) ListToolExecutionsByRun(ctx context.Context, runID, sessionID stri
 			&startedAtRaw,
 			&finishedAtRaw,
 			&resultEntryID,
-			&arguments,
+			&arguments, &te.Status, &executed, &te.ErrorMessage,
 		); err != nil {
 			return nil, fmt.Errorf("读取工具执行行: %w", err)
 		}
@@ -228,11 +247,16 @@ func (tx *Tx) ListToolExecutionsByRun(ctx context.Context, runID, sessionID stri
 			}
 			te.Arguments = &args
 		}
-		startedAt, err := time.Parse(time.RFC3339Nano, startedAtRaw)
-		if err != nil {
-			return nil, fmt.Errorf("解析工具启动时间: %w", err)
+		if startedAtRaw.Valid {
+			startedAt, err := time.Parse(time.RFC3339Nano, startedAtRaw.String)
+			if err != nil {
+				return nil, err
+			}
+			te.StartedAt = &startedAt
 		}
-		te.StartedAt = startedAt
+		if executed.Valid {
+			te.Executed = &executed.Bool
+		}
 
 		if finishedAtRaw.Valid {
 			t, err := time.Parse(time.RFC3339Nano, finishedAtRaw.String)
@@ -261,12 +285,18 @@ func (tx *Tx) ListToolExecutionsByRun(ctx context.Context, runID, sessionID stri
 // scanEntry 统一处理单条查询和列表查询的字段恢复，不跳过损坏记录。
 func scanEntry(row interface{ Scan(...any) error }) (config.Entry, error) {
 	var entry config.Entry
-	var parent, origin, assistant, call sql.NullString
+	var parent, origin, assistant, call, sourceKind, sourceID, visible sql.NullString
 	var created, message string
 	err := row.Scan(&entry.ID, &entry.SessionID, &parent, &entry.Sequence, &entry.RunID,
-		&created, &message, &origin, &assistant, &call)
+		&created, &message, &origin, &assistant, &call, &entry.Kind, &sourceKind, &sourceID, &entry.Processing, &visible)
 	if err != nil {
 		return config.Entry{}, fmt.Errorf("读取 Entry: %w", err)
+	}
+	entry.SourceKind, entry.SourceID = sourceKind.String, sourceID.String
+	if visible.Valid {
+		if err := json.Unmarshal([]byte(visible.String), &entry.VisibleContent); err != nil {
+			return config.Entry{}, err
+		}
 	}
 	entry.ParentID, entry.AssistantEntryID, entry.ToolCallID = parent.String, assistant.String, call.String
 	entry.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
@@ -283,4 +313,11 @@ func scanEntry(row interface{ Scan(...any) error }) (config.Entry, error) {
 		}
 	}
 	return entry, nil
+}
+
+func nullText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

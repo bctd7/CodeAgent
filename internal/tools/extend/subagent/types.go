@@ -1,4 +1,4 @@
-// Package subagent 提供可注入的子代理工具适配层，尚不执行真实子任务。
+// Package subagent 提供可注入的子代理工具适配层；实际执行由 Controller 负责。
 package subagent
 
 import (
@@ -29,10 +29,14 @@ const (
 // Task 是业务实现返回的快照。结果复用现有模型内容类型，不暴露整个会话历史。
 // 发起取消后尚未完成收尾时仍可为 running；终态由业务实现确认。
 type Task struct {
-	ID     string             `json:"id"`
-	State  TaskState          `json:"state"`
-	Result []llm.ContentBlock `json:"result,omitempty"`
-	Error  string             `json:"error,omitempty"`
+	ID        string             `json:"id"`
+	State     TaskState          `json:"state"`
+	Result    []llm.ContentBlock `json:"result,omitempty"`
+	Error     string             `json:"error,omitempty"`
+	RunID     string             `json:"run_id,omitempty"`
+	SessionID string             `json:"session_id,omitempty"`
+	ResultRef string             `json:"result_ref,omitempty"`
+	Truncated bool               `json:"truncated,omitempty"`
 }
 
 type SpawnRequest struct {
@@ -41,6 +45,8 @@ type SpawnRequest struct {
 	// ModelRef 沿用仓库配置引用语义，不接受凭据或地址；nil 由 Runtime 继承当前模型。
 	// 工具层不解析模型是否存在，也不选择默认模型。
 	ModelRef *string `json:"model_ref,omitempty"`
+	// FileScope 是 worker 可修改的文件列表；省略时由首次修改取得整个 Run 的占用。
+	FileScope []string `json:"file_scope,omitempty"`
 }
 
 type SendRequest struct {
@@ -101,6 +107,17 @@ func (r SpawnRequest) validate() error {
 	if r.ModelRef != nil && strings.TrimSpace(*r.ModelRef) == "" {
 		return fmt.Errorf("参数 model_ref 必须为非空字符串")
 	}
+	if len(r.Task) > 1<<20 || len(r.FileScope) > 256 {
+		return fmt.Errorf("任务说明或文件范围超出上限")
+	}
+	if r.Role == Explore && len(r.FileScope) > 0 {
+		return fmt.Errorf("explore 不接受修改文件范围")
+	}
+	for _, path := range r.FileScope {
+		if strings.TrimSpace(path) == "" {
+			return fmt.Errorf("文件范围不能包含空路径")
+		}
+	}
 	return nil
 }
 
@@ -112,7 +129,7 @@ func (r SendRequest) validate() error {
 }
 
 func (r WaitRequest) validate() error {
-	if len(r.IDs) == 0 {
+	if len(r.IDs) == 0 || len(r.IDs) > 64 {
 		return fmt.Errorf("参数 ids 必须包含至少一个任务 ID")
 	}
 	seen := make(map[string]bool, len(r.IDs))

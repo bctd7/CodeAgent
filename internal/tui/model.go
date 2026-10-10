@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -20,6 +21,15 @@ type dialog struct {
 	choices     []Choice
 	selected    int
 	body        viewport.Model
+	form        *FormEvent
+	fields      []textinput.Model
+	filter      string
+	allChoices  []Choice
+	menu        *MenuEvent
+	parent      *dialog
+	menuItems   []MenuItem
+	filterIndex int
+	targetField int
 }
 type operation struct {
 	id     uint64

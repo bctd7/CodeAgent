@@ -39,6 +39,7 @@ type SessionListOptions struct {
 // SessionInfo 是会话元数据，不是 Agent 实例或数据库连接。
 // 归档不会删除历史，切换历史分支不会回滚文件或工具副作用。
 type SessionInfo struct {
+	MemoryEnabled  bool            `json:"memory_enabled"`
 	ID             string          `json:"id"`
 	Title          string          `json:"title"`
 	WorkingDir     string          `json:"working_dir"`

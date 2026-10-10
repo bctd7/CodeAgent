@@ -72,6 +72,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, noticeCmd
 		}
 		m.clearNotice()
+		if m.dialog != nil && m.dialog.form != nil {
+			m.dialog = m.dialog.parent
+		}
 		if op.draft != "" && m.input.Value() == op.draft {
 			m.input.Reset()
 			m.completion = 0
@@ -95,8 +98,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	case tea.KeyMsg:
 		// 粘贴的内容必须进入 textarea，不能被解释成快捷键或弹层操作。
+		if msg.Paste && m.dialog != nil && m.dialog.form != nil && len(m.approvals) == 0 {
+			return m, m.formKey(msg)
+		}
+		if msg.Paste && m.dialog != nil && m.dialog.menu != nil && len(m.approvals) == 0 {
+			return m, m.menuKey(msg)
+		}
 		if msg.Paste {
-			if len(m.approvals) > 0 || m.dialog != nil {
+			if len(m.approvals) > 0 || (m.dialog != nil && m.dialog.form == nil) {
 				return m, nil
 			}
 			break
@@ -142,6 +151,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.openChoices(ListSessions)
 		case "f3":
 			return m, m.openChoices(ListModels)
+		case "f5":
+			return m, m.dispatch(Action{Kind: ExecuteCommand, Text: "/new"}, "")
+		case "f6":
+			return m, m.dispatch(Action{Kind: ExecuteCommand, Text: "/settings"}, "")
+		case "f7":
+			return m, m.dispatch(Action{Kind: ExecuteCommand, Text: "/tools"}, "")
 		case "f4":
 			m.openTools()
 			return m, nil
@@ -190,6 +205,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if len(m.approvals) == 0 && m.dialog == nil {
 		m.input, cmd = m.input.Update(msg)
 		m.syncInputViewport()
+	}
+	if len(m.approvals) == 0 && m.dialog != nil && m.dialog.form != nil {
+		d := m.dialog
+		d.fields[d.selected], cmd = d.fields[d.selected].Update(msg)
+		m.refreshDialog()
 	}
 	return m, cmd
 }
@@ -247,7 +267,7 @@ func (m *Model) apply(event Event) tea.Cmd {
 		if event.Kind != ListSessions && event.Kind != ListModels {
 			return nil
 		}
-		m.dialog = &dialog{kind: event.Kind, choices: append([]Choice(nil), event.Choices...)}
+		m.dialog = &dialog{kind: event.Kind, choices: append([]Choice(nil), event.Choices...), allChoices: append([]Choice(nil), event.Choices...)}
 		for i, choice := range event.Choices {
 			if event.Kind == ListModels && choice.ID == m.status.Model || event.Kind == ListSessions && choice.ID == m.status.SessionID {
 				m.dialog.selected = i
@@ -255,11 +275,24 @@ func (m *Model) apply(event Event) tea.Cmd {
 			}
 		}
 		m.layout()
+	case FormEvent:
+		if !m.accepts(event.Scope) {
+			return nil
+		}
+		parent := m.dialog
+		m.openForm(event)
+		m.dialog.parent = parent
+	case MenuEvent:
+		if !m.accepts(event.Scope) {
+			return nil
+		}
+		m.openMenu(event)
+		m.layout()
 	case PanelEvent:
 		if !m.accepts(event.Scope) {
 			return nil
 		}
-		m.dialog = &dialog{kind: ActionKind("panel"), title: event.Title, text: event.Text}
+		m.dialog = &dialog{kind: ActionKind("panel"), title: event.Title, text: event.Text, parent: m.dialog}
 		m.layout()
 	case ApprovalEvent:
 		if !m.accepts(event.Scope) || event.Approval.ID == "" {

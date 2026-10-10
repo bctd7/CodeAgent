@@ -65,6 +65,7 @@ type Action struct {
 	Kind                                                   ActionKind
 	SessionID, RunID, Text, ChoiceID, ApprovalID, NoticeID string
 	Decision                                               ApprovalDecision
+	Page                                                   string
 }
 
 // Handler 在 Tea 命令中异步执行，须遵守 context。取消/退出可与其他操作并发；
@@ -142,3 +143,36 @@ func (ApprovalEvent) tuiEvent()         {}
 func (ApprovalResolvedEvent) tuiEvent() {}
 func (NoticeEvent) tuiEvent()           {}
 func (ExitEvent) tuiEvent()             {}
+
+// FormEvent collects command arguments without owning their business rules.
+// MenuItem contains only presentation data and existing CLI command intents.
+type MenuItem struct {
+	Label, Detail, Text, Command, Disabled, Filter string
+	Children                                       []MenuItem
+	Form                                           *FormEvent
+	Value                                          string
+}
+type MenuEvent struct {
+	Scope
+	Title, Text, Page string
+	Items             []MenuItem
+	Search            bool
+	Filters           []string
+}
+
+func (MenuEvent) tuiEvent() {}
+
+type FormField struct {
+	Name, Label, Value string
+	Boolean            bool
+	Options            []Choice
+}
+type FormEvent struct {
+	Scope
+	Title, Command string
+	Page           string
+	Plain          bool
+	Fields         []FormField
+}
+
+func (FormEvent) tuiEvent() {}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"CodeAgent/internal/agent"
@@ -121,7 +122,8 @@ func (r *Runtime) toolBindings() ([]ToolBinding, error) {
 			return nil, err
 		}
 		for _, tool := range list {
-			bindings = append(bindings, ToolBinding{Tool: tool, Identity: permission.Tool{Source: permission.Builtin, SourceID: "subagent", ToolID: tool.Name}, Capability: permission.Unknown})
+			tool = parentTaskTool(tool)
+			bindings = append(bindings, ToolBinding{Tool: tool, Identity: permission.Tool{Source: permission.Builtin, SourceID: "subagent", ToolID: tool.Name}, Capability: permission.Orchestration})
 		}
 	}
 	return r.mcpBindings(bindings)
@@ -229,4 +231,28 @@ func (r *Runtime) targets(binding *toolBinding, args map[string]any) ([]string, 
 		}
 	}
 	return paths, nil
+}
+
+// ToolInfo is a detached view of the tools currently installed in this Runtime.
+type ToolInfo struct {
+	Name        string                `json:"name"`
+	Description string                `json:"description"`
+	Parameters  json.RawMessage       `json:"parameters"`
+	Identity    permission.Tool       `json:"identity"`
+	Capability  permission.Capability `json:"capability"`
+}
+
+func (r *Runtime) ToolCatalog() ([]ToolInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closing {
+		return nil, ErrClosed
+	}
+	out := make([]ToolInfo, 0, len(r.bindings))
+	for _, binding := range r.bindings {
+		data := append(json.RawMessage(nil), binding.Tool.Schema...)
+		out = append(out, ToolInfo{Name: binding.Tool.Name, Description: binding.Tool.Description, Parameters: data, Identity: binding.Identity, Capability: binding.Capability})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }

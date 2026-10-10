@@ -148,11 +148,17 @@ func lockAdmission(ctx context.Context, mu *sync.Mutex) error {
 		}
 	}
 }
+
+// SetPolicy applies one project policy at the existing Host-wide idle boundary.
+// Role restrictions remain narrower than the project policy.
 func (r *Runtime) SetPolicy(ctx context.Context, policy permission.Policy) error {
-	r.operation.Lock()
-	defer r.operation.Unlock()
-	if err := r.admission(); err != nil {
-		return err
+	if policy.WorkMode != permission.Plan && policy.WorkMode != permission.Build {
+		return fmt.Errorf("无效工作模式")
+	}
+	switch policy.ApprovalMode {
+	case permission.Default, permission.AutoEdit, permission.AutoApprove:
+	default:
+		return fmt.Errorf("无效审批模式")
 	}
 	if policy.WorkingDir != r.host.options.ProjectDir {
 		return fmt.Errorf("策略项目目录必须保持 Host 绑定")
@@ -164,7 +170,70 @@ func (r *Runtime) SetPolicy(ctx context.Context, policy permission.Policy) error
 		}
 		policy.PlanDir = path
 	}
-	return r.idle(ctx, func() error { r.policy = policy; r.permissions.Clear(); return nil })
+	policy.DeniedTools = append([]permission.Tool(nil), policy.DeniedTools...)
+	ctx, cancel := linkedContext(ctx, r.life)
+	defer cancel()
+	h := r.host
+	if err := lockAdmission(ctx, &h.catalogMu); err != nil {
+		return err
+	}
+	defer h.catalogMu.Unlock()
+	h.mu.Lock()
+	if h.closing {
+		h.mu.Unlock()
+		return ErrClosed
+	}
+	for _, current := range h.runtimes {
+		if current == nil {
+			h.mu.Unlock()
+			return ErrBusy
+		}
+	}
+	h.catalogChanging = true
+	h.mu.Unlock()
+	defer func() { h.mu.Lock(); h.catalogChanging = false; h.mu.Unlock() }()
+	opened := h.Opened()
+	var locked []*Runtime
+	defer func() {
+		for i := len(locked) - 1; i >= 0; i-- {
+			locked[i].operation.Unlock()
+		}
+	}()
+	for _, current := range opened {
+		if err := lockAdmission(ctx, &current.operation); err != nil {
+			return err
+		}
+		locked = append(locked, current)
+	}
+	if err := r.admission(); err != nil {
+		return err
+	}
+	for _, current := range opened {
+		if err := current.admission(); err != nil {
+			return err
+		}
+		if err := current.idle(ctx, func() error { return nil }); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	if h.closing {
+		h.mu.Unlock()
+		return ErrClosed
+	}
+	h.options.Policy = policy
+	for _, current := range opened {
+		current.policy = policy
+		if current.role == "explore" {
+			current.policy.WorkMode = permission.Plan
+		}
+		current.permissions.Clear()
+	}
+	h.mu.Unlock()
+	return nil
 }
 func (r *Runtime) SetHooks(ctx context.Context, engine *hooks.Engine, model *hooks.ModelHooks) error {
 	r.operation.Lock()

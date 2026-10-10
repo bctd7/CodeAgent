@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     title TEXT NOT NULL,
     working_dir TEXT NOT NULL,
     model_selection_json TEXT,
+    memory_enabled INTEGER NOT NULL DEFAULT 1 CHECK (memory_enabled IN (0,1)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     archived_at TEXT,
@@ -104,4 +105,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS entries_assistant_tool_call ON entries(assista
 `
 
 // SetUserVersionSQL 只初始化当前版本，不升级已有数据库。
-const SetUserVersionSQL = `PRAGMA user_version = 5`
+const SetUserVersionSQL = `PRAGMA user_version = 6`

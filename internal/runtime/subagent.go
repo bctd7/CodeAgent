@@ -3,6 +3,7 @@ package runtime
 import (
 	"CodeAgent/internal/agent"
 	"CodeAgent/internal/llm"
+	"CodeAgent/internal/permission"
 	sc "CodeAgent/internal/session/config"
 	"CodeAgent/internal/tools/extend/subagent"
 	"context"
@@ -61,7 +62,7 @@ func (child *childExecution) taskLocked() subagent.Task {
 	task.Truncated = child.result.StopReason == agent.RunStopTruncated
 	for i := len(child.result.Messages) - 1; i >= 0; i-- {
 		if message, ok := child.result.Messages[i].(*llm.AssistantMessage); ok {
-			task.Result = append([]llm.ContentBlock(nil), message.Content...)
+			task.Result = publicResultBlocks(message.Content)
 			break
 		}
 	}
@@ -120,7 +121,7 @@ func (r *Runtime) Spawn(ctx context.Context, request subagent.SpawnRequest) (sub
 			return subagent.Task{}, fmt.Errorf("子任务范围超出项目")
 		}
 	}
-	info, err := r.host.service.CreateSessionWithModel(ctx, "子任务", r.host.options.ProjectDir, sc.ModelSelection{Ref: ref})
+	info, err := r.host.service.CreateSessionWithModel(ctx, "子任务", r.host.options.ProjectDir, sc.ModelSelection{Ref: ref}, r.memoryEnabled)
 	if err != nil {
 		return subagent.Task{}, err
 	}
@@ -354,6 +355,14 @@ func (r *Runtime) collectChildren(c agent.Checkpoint) ([]llm.Message, error) {
 			if err != nil {
 				return nil, err
 			}
+			parent, err := r.session.GetRun(c.Context, c.RunID)
+			if err != nil {
+				return nil, err
+			}
+			task := taskFromRun(child.id, detail)
+			if r.childResultVisible(parent, task) {
+				continue
+			}
 			message, err := childDelivery(child.id, detail)
 			if err != nil {
 				return nil, err
@@ -365,31 +374,45 @@ func (r *Runtime) collectChildren(c agent.Checkpoint) ([]llm.Message, error) {
 				r.persistFault(err)
 				return nil, err
 			}
-			child.mu.Lock()
-			for i, saved := range child.pending {
-				if saved == reference {
-					copy(child.pending[i:], child.pending[i+1:])
-					child.pending[len(child.pending)-1] = childRunReference{}
-					child.pending = child.pending[:len(child.pending)-1]
-					break
-				}
-			}
-			child.mu.Unlock()
 			messages = append(messages, entry.Message)
 		}
 	}
 	return messages, nil
 }
 
-// 相同 child Run 总是从持久事实构造相同交付，包括固定的结束时间，交由 Session 原子去重。
-func childDelivery(taskID string, detail sc.RunDetail) (*llm.UserMessage, error) {
-	run := detail.Record
-	if run.FinishedAt == nil {
-		return nil, fmt.Errorf("子 Run 尚未收尾: %s", run.ID)
+// taskOutput is the parent-facing result, not an encoding of internal LLM blocks.
+type taskOutput struct {
+	ID        string             `json:"id"`
+	State     subagent.TaskState `json:"state"`
+	Result    string             `json:"result,omitempty"`
+	Error     string             `json:"error,omitempty"`
+	RunID     string             `json:"run_id,omitempty"`
+	SessionID string             `json:"session_id,omitempty"`
+	ResultRef string             `json:"result_ref,omitempty"`
+	Truncated bool               `json:"truncated,omitempty"`
+}
+
+func publicResultBlocks(content []llm.ContentBlock) []llm.ContentBlock {
+	var out []llm.ContentBlock
+	for _, block := range content {
+		if block.Type == llm.TypeText {
+			out = append(out, llm.ContentBlock{Type: llm.TypeText, Text: block.Text})
+		}
 	}
-	task := subagent.Task{ID: taskID, SessionID: run.SessionID, RunID: run.ID,
-		ResultRef: run.SessionID + "/" + run.ID, Error: run.ErrorMessage,
-		Truncated: run.StopReason == llm.StopLength}
+	return out
+}
+func taskView(task subagent.Task) taskOutput {
+	var texts []string
+	for _, block := range task.Result {
+		if block.Type == llm.TypeText {
+			texts = append(texts, block.Text)
+		}
+	}
+	return taskOutput{ID: task.ID, State: task.State, Result: strings.Join(texts, "\n"), Error: task.Error, RunID: task.RunID, SessionID: task.SessionID, ResultRef: task.ResultRef, Truncated: task.Truncated}
+}
+func taskFromRun(taskID string, detail sc.RunDetail) subagent.Task {
+	run := detail.Record
+	task := subagent.Task{ID: taskID, SessionID: run.SessionID, RunID: run.ID, ResultRef: run.SessionID + "/" + run.ID, Error: run.ErrorMessage, Truncated: run.StopReason == llm.StopLength}
 	switch run.State {
 	case sc.RunStateSuccess:
 		task.State = subagent.Completed
@@ -400,13 +423,110 @@ func childDelivery(taskID string, detail sc.RunDetail) (*llm.UserMessage, error)
 	}
 	for i := len(detail.Entries) - 1; i >= 0; i-- {
 		if message, ok := detail.Entries[i].Message.(*llm.AssistantMessage); ok {
-			task.Result = message.Content
+			task.Result = publicResultBlocks(message.Content)
 			break
 		}
 	}
-	raw, err := json.Marshal(task)
+	return task
+}
+
+// 相同 child Run 从持久事实构造相同交付，包括固定结束时间，交由 Session 原子去重。
+func childDelivery(taskID string, detail sc.RunDetail) (*llm.UserMessage, error) {
+	if detail.Record.FinishedAt == nil {
+		return nil, fmt.Errorf("子 Run 尚未收尾: %s", detail.Record.ID)
+	}
+	raw, err := json.Marshal(taskView(taskFromRun(taskID, detail)))
 	if err != nil {
 		return nil, err
 	}
-	return &llm.UserMessage{Role: llm.RoleUser, Content: []llm.ContentBlock{{Type: llm.TypeText, Text: "子任务结果：" + string(raw)}}, Timestamp: *run.FinishedAt}, nil
+	return &llm.UserMessage{Role: llm.RoleUser, Content: []llm.ContentBlock{{Type: llm.TypeText, Text: "子任务结果：" + string(raw) + "\n这是宿主交付的最终结果，不是新的用户请求；结合原任务汇总或继续处理，不要仅确认收到。"}}, Timestamp: *detail.Record.FinishedAt}, nil
+}
+
+// Keep the existing Controller/tools adapter; only project its result for the parent.
+func parentTaskTool(tool agent.Tool) agent.Tool {
+	execute := tool.Execute
+	tool.Execute = func(ctx context.Context, id string, args map[string]any, progress func(llm.ContentBlock)) ([]llm.ContentBlock, error) {
+		content, err := execute(ctx, id, args, progress)
+		if err != nil {
+			return nil, err
+		}
+		var out []llm.ContentBlock
+		for _, block := range content {
+			if block.Type != llm.TypeText {
+				return nil, fmt.Errorf("子任务适配结果必须为 JSON 文本")
+			}
+			var projected any
+			if tool.Name == "wait" {
+				var wait subagent.WaitResult
+				if err = json.Unmarshal([]byte(block.Text), &wait); err != nil {
+					return nil, err
+				}
+				tasks := make([]taskOutput, 0, len(wait.Tasks))
+				for _, task := range wait.Tasks {
+					tasks = append(tasks, taskView(task))
+				}
+				projected = struct {
+					Tasks    []taskOutput `json:"tasks"`
+					TimedOut bool         `json:"timed_out"`
+				}{tasks, wait.TimedOut}
+			} else {
+				var task subagent.Task
+				if err = json.Unmarshal([]byte(block.Text), &task); err != nil {
+					return nil, err
+				}
+				projected = taskView(task)
+			}
+			raw, err := json.Marshal(projected)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, llm.ContentBlock{Type: llm.TypeText, Text: string(raw)})
+		}
+		return out, nil
+	}
+	return tool
+}
+
+// Read the durable, final model-visible projection only at the end checkpoint,
+// after Agent has consumed the tool batch. Pending/raw or Hook-hidden results are
+// not receipts. No in-memory "delivered" flag can outrun persistence/Resolve.
+func (r *Runtime) childResultVisible(parent sc.RunDetail, task subagent.Task) bool {
+	expected := taskView(task)
+	for _, entry := range parent.Entries {
+		if entry.Kind == sc.ContextEntry && entry.SourceKind == "child_run" && entry.SourceID == task.RunID {
+			return true
+		}
+		result, ok := entry.Message.(*llm.ToolResultMessage)
+		if !ok || result.IsError || entry.Processing == sc.ProcessingPending {
+			continue
+		}
+		binding := r.bindings[result.ToolName]
+		if binding == nil || binding.Identity.Source != permission.Builtin || binding.Identity.SourceID != "subagent" {
+			continue
+		}
+		content := result.Content
+		if entry.Processing == sc.ProcessingReplaced {
+			content = entry.VisibleContent
+		}
+		for _, block := range content {
+			if block.Type != llm.TypeText {
+				continue
+			}
+			var single taskOutput
+			if json.Unmarshal([]byte(block.Text), &single) == nil && single == expected {
+				return true
+			}
+			var wait struct {
+				Tasks []taskOutput `json:"tasks"`
+			}
+			if json.Unmarshal([]byte(block.Text), &wait) == nil {
+				for _, received := range wait.Tasks {
+					if received == expected {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }

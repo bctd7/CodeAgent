@@ -27,3 +27,22 @@ func resolveConfig(explicit, host string) (string, error) {
 	}
 	return path, nil
 }
+
+// Missing default settings preserve built-in defaults; explicit files are required.
+func resolveSettings(explicit string) (string, error) {
+	if explicit != "" {
+		return filepath.Abs(explicit)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(filepath.Dir(exe), "settings.json")
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("cannot access settings.json next to executable")
+	}
+	return path, nil
+}

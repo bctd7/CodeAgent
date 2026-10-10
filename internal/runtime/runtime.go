@@ -23,7 +23,7 @@ import (
 // Event 是展示通知；执行和保存不依赖订阅者，不暴露审批凭据或模型选项。
 type Event struct {
 	// Dropped 表示该观察者缓冲溢出丢弃的通知数；显示端应重新读取 Snapshot。
-	Dropped uint64
+	Dropped        uint64
 	Agent          *agent.Event
 	Approval       *Approval
 	Notices        *hooks.Notices
@@ -74,6 +74,7 @@ type Runtime struct {
 	records        map[string]*runRecords // 仅 Driver 主协调者使用。
 	feedback       map[string][]feedback  // 工具节点可并发准备，按节点 ID 汇总。
 	children       map[string]*childExecution
+	memoryEnabled  bool
 	memory         *longterm.Service
 	memoryCancel   context.CancelFunc
 	memoryDone     chan struct{}
@@ -145,11 +146,12 @@ func (h *Host) initialize(ctx context.Context, id, role string, scope []string) 
 	if role == "explore" {
 		r.policy.WorkMode = permission.Plan
 	}
+	r.memoryEnabled = info.MemoryEnabled
 	r.prompt, err = r.loadPrompt(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if h.options.MemoryDirectory != "" {
+	if r.memoryEnabled && h.options.MemoryDirectory != "" {
 		r.memory, err = longterm.NewService(h.options.MemoryDirectory, longterm.Options{Limits: h.options.MemoryLimits, Execute: r.executeMemory})
 		if err != nil {
 			return nil, err
@@ -159,7 +161,10 @@ func (h *Host) initialize(ctx context.Context, id, role string, scope []string) 
 		return nil, err
 	}
 	if r.hooks != nil {
-		source:="startup";if info.HeadID!="" {source="resume"}
+		source := "startup"
+		if info.HeadID != "" {
+			source = "resume"
+		}
 		out, hookErr := r.hooks.SessionStart(ctx, hooks.SessionStartInput{CommonInput: r.common(), Source: source})
 		r.emit(Event{Notices: &out.Notices})
 		if hookErr = hookError(out.Notices, hookErr); hookErr != nil {
@@ -299,14 +304,19 @@ func (r *Runtime) Snapshot() Snapshot {
 
 // Subscribe 使用独立的有界展示缓冲；慢观察者不阻塞执行。事件只读，溢出可用 Snapshot 恢复。
 func (r *Runtime) Subscribe(callback func(Event)) func() {
-	if callback==nil{return func(){}}
+	if callback == nil {
+		return func() {}
+	}
 	id := uuid.NewString()
 	r.mu.Lock()
-	if r.closing {r.mu.Unlock();return func(){}}
-	listener:=newObserver(func(_ string,event Event){callback(event)})
-	r.subscriptions[id]=listener
+	if r.closing {
+		r.mu.Unlock()
+		return func() {}
+	}
+	listener := newObserver(func(_ string, event Event) { callback(event) })
+	r.subscriptions[id] = listener
 	r.mu.Unlock()
-	return func() { r.mu.Lock(); delete(r.subscriptions, id); r.mu.Unlock();listener.stop() }
+	return func() { r.mu.Lock(); delete(r.subscriptions, id); r.mu.Unlock(); listener.stop() }
 }
 func (r *Runtime) emit(event Event) {
 	r.mu.Lock()
@@ -317,21 +327,88 @@ func (r *Runtime) emit(event Event) {
 	r.mu.Unlock()
 	r.host.emit(r.id, event)
 	for _, fn := range callbacks {
-		fn.publish(r.id,event)
+		fn.publish(r.id, event)
 	}
 }
 
-type observation struct { sessionID string; event Event }
+type observation struct {
+	sessionID string
+	event     Event
+}
+
 // observer 仅传展示通知，不参与审批或执行交接。每个观察者最多一个回调在运行。
-type observer struct { mu sync.Mutex; items chan observation; stopped bool; dropped uint64 }
-func newObserver(callback func(string,Event)) *observer {
-	if callback==nil{return nil};o:=&observer{items:make(chan observation,64)}
-	go func(){for item:=range o.items {o.mu.Lock();stopped:=o.stopped;o.mu.Unlock();if stopped{return};func(){defer func(){if value:=recover();value!=nil {log.Printf("Runtime 观察者 panic: %v",value)}}();callback(item.sessionID,item.event)}()}}()
+type observer struct {
+	mu      sync.Mutex
+	items   chan observation
+	stopped bool
+	dropped uint64
+}
+
+func newObserver(callback func(string, Event)) *observer {
+	if callback == nil {
+		return nil
+	}
+	o := &observer{items: make(chan observation, 64)}
+	go func() {
+		for item := range o.items {
+			o.mu.Lock()
+			stopped := o.stopped
+			o.mu.Unlock()
+			if stopped {
+				return
+			}
+			func() {
+				defer func() {
+					if value := recover(); value != nil {
+						log.Printf("Runtime 观察者 panic: %v", value)
+					}
+				}()
+				callback(item.sessionID, item.event)
+			}()
+		}
+	}()
 	return o
 }
-func (o *observer) publish(id string,event Event) {if o==nil{return};o.mu.Lock();defer o.mu.Unlock();if o.stopped{return};select{case o.items<-observation{id,event}:return;default:};select{case old:=<-o.items:o.dropped+=1+old.event.Dropped;default:};event.Dropped+=o.dropped;o.dropped=0;select{case o.items<-observation{id,event}:default:o.dropped+=1+event.Dropped}}
+func (o *observer) publish(id string, event Event) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.stopped {
+		return
+	}
+	select {
+	case o.items <- observation{id, event}:
+		return
+	default:
+	}
+	select {
+	case old := <-o.items:
+		o.dropped += 1 + old.event.Dropped
+	default:
+	}
+	event.Dropped += o.dropped
+	o.dropped = 0
+	select {
+	case o.items <- observation{id, event}:
+	default:
+		o.dropped += 1 + event.Dropped
+	}
+}
+
 // 不等待用户回调：Go 无法强制终止回调，关闭不得因此扣留数据库或 OS 锁。
-func (o *observer) stop() {if o==nil{return};o.mu.Lock();defer o.mu.Unlock();if !o.stopped{o.stopped=true;close(o.items)}}
+func (o *observer) stop() {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.stopped {
+		o.stopped = true
+		close(o.items)
+	}
+}
 
 func linkedContext(ctx, lifetime context.Context) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -395,7 +472,10 @@ func (r *Runtime) beginClose() {
 			}
 			failures = append(failures, closeLock(r.owner))
 			r.mu.Lock()
-			for _,listener:=range r.subscriptions {listener.stop()};clear(r.subscriptions)
+			for _, listener := range r.subscriptions {
+				listener.stop()
+			}
+			clear(r.subscriptions)
 			clear(r.children)
 			clear(r.inputs)
 			clear(r.feedback)

@@ -41,7 +41,10 @@ const (
 	ReadOnly  Capability = "read_only"
 	FileWrite Capability = "file_write"
 	Shell     Capability = "shell"
-	Unknown   Capability = "unknown"
+	// Orchestration 管理可信宿主内部任务生命周期，不直接修改项目文件、执行 shell 或外置工具。
+	// 被调度任务中的实际工具必须独立进行权限判断；不是通用的可信免审标记。
+	Orchestration Capability = "orchestration"
+	Unknown       Capability = "unknown"
 )
 
 // Tool 标识具体工具；SourceID 是可信来源身份，不是可冒用的展示名称。
@@ -89,6 +92,7 @@ const (
 	PlanRestriction      Reason = "plan_restriction"
 	PlanMarkdown         Reason = "plan_markdown"
 	BuiltinReadOnly      Reason = "builtin_read_only"
+	BuiltinOrchestration Reason = "builtin_orchestration"
 	ExternalConfirmation Reason = "external_confirmation"
 	WriteConfirmation    Reason = "write_confirmation"
 	ShellConfirmation    Reason = "shell_confirmation"

@@ -158,7 +158,7 @@ func NewHost(ctx context.Context, options Options) (*Host, error) {
 	return h, nil
 }
 
-func (h *Host) Create(ctx context.Context, title string) (sc.SessionInfo, error) {
+func (h *Host) Create(ctx context.Context, title string, memoryEnabled bool) (sc.SessionInfo, error) {
 	h.mu.Lock()
 	if h.closing {
 		h.mu.Unlock()
@@ -167,7 +167,7 @@ func (h *Host) Create(ctx context.Context, title string) (sc.SessionInfo, error)
 	h.opening.Add(1)
 	h.mu.Unlock()
 	defer h.opening.Done()
-	return h.service.CreateSessionWithModel(ctx, title, h.options.ProjectDir, sc.ModelSelection{Ref: h.options.ModelRef})
+	return h.service.CreateSessionWithModel(ctx, title, h.options.ProjectDir, sc.ModelSelection{Ref: h.options.ModelRef}, memoryEnabled)
 }
 
 // Open 装配宿主选定的主会话执行实例，不是只读历史查询，也不恢复旧 Run。

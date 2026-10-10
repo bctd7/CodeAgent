@@ -37,6 +37,9 @@ func Evaluate(policy Policy, request Request) Result {
 	if request.Capability == ReadOnly {
 		return decide(Allow, BuiltinReadOnly)
 	}
+	if request.Capability == Orchestration {
+		return decide(Allow, BuiltinOrchestration)
+	}
 	if policy.ApprovalMode == AutoApprove {
 		return decide(Allow, BuiltinAutoApprove)
 	}
@@ -58,5 +61,5 @@ func validRequest(request Request) bool {
 		request.Tool.SourceID != "" && request.Tool.ToolID != "" &&
 		(request.Tool.Source == Builtin || request.Tool.Source == External) &&
 		(request.Capability == ReadOnly || request.Capability == FileWrite ||
-			request.Capability == Shell || request.Capability == Unknown)
+			request.Capability == Shell || request.Capability == Orchestration || request.Capability == Unknown)
 }

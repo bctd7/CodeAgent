@@ -59,6 +59,16 @@ func (a *application) chat(ctx context.Context) int {
 					return ExitFailure
 				}
 			}
+			if result.prompt != "" {
+				out := a.run(ctx, result.prompt)
+				code = out.ExitCode
+				if err = a.writeResult(out); err != nil {
+					return ExitFailure
+				}
+				if code == ExitApprovalRequired || code == ExitCancelled || code == ExitTimeout || a.current.Snapshot().Fault != nil {
+					return code
+				}
+			}
 			continue
 		}
 		out := a.run(ctx, text)

@@ -1,6 +1,6 @@
 # Runtime 接线
 
-当前为第一阶段可构建实现，尚未完成待做计划的全部验收。不会恢复旧 Runtime API。宿主须提供已初始化的当前版本 Session Store、真实项目目录、稳定所有权目录、明确模型引用和模型配置；不读取 config.toml、不迁移数据库、不改变进程工作目录。
+当前已接入正式 CLI/TUI 并有针对性回归，但仍未完成系统性代码审查；Runtime、Tools、Permission、TUI、CLI 五模块均不能因测试通过标为审查通过。不会恢复旧 Runtime API。宿主须提供已初始化的当前版本 Session Store、真实项目目录、稳定所有权目录、明确模型引用和模型配置；不读取 config.toml、不迁移数据库、不改变进程工作目录。
 
 ## 入口与资源
 
@@ -38,7 +38,7 @@ Store 与 MCP Manager 的关闭责任分别由 CloseStore/CloseMCP 明确声明�
 
 ## 当前验证及未完成事项
 
-验收副本位于 `C:/Users/27902/Documents/Codex/2026-10-05/task-6/runtime-work/acceptance`，不往项目写永久测试。第一批 10 个顶层用例通过；覆盖主链、审批选择、并行等待取消、队列取消、原生模型 Hook 错误、来源换算、锁取消、记忆预算和子任务交付。Windows/amd64 与 Linux/amd64 目标构建通过；Linux 只交叉编译。
+验收副本位于 仓库外的历史临时验收目录，该阶段没有新增永久测试，后续项目内已补正式回归。第一批 10 个顶层用例通过；覆盖主链、审批选择、并行等待取消、队列取消、原生模型 Hook 错误、来源换算、锁取消、记忆预算和子任务交付。Windows/amd64 与 Linux/amd64 目标构建通过；Linux 只交叉编译。
 
 以下尚未满足完整交付，不能据编译通过标记 Runtime 完成：
 
@@ -46,7 +46,7 @@ Store 与 MCP Manager 的关闭责任分别由 CloseStore/CloseMCP 明确声明�
 - 文件占用允许取得空闲的逆序目标。同一 Host 内仅保留占用请求的短期等待边，并检测 worker 间及父子生命周期等待环；形成环时拒绝当前占用请求，不释放已有生命周期占用或中止其他 Run。普通占用等待响应取消。跨 Host/进程的 OS 锁不提供持有者身份，不能据此保证跨进程环检测。
 - worker 默认不装 shell；Unknown 只有在可信宿主提供完整非空文件目标提取时才可安装，并同样执行范围校验、审批及占用。可信外部/MCP 适配绑定可经 Options.Tools 注入，不因来源额外禁用。自动发现 MCP 没有可信写目标，仍不进入 worker；不能把 readonly hint 当成可信能力。主会话 shell/无法枚举目标的外部工具不提供具体文件占用保证。
 - 命令 Hook 参数改写、空输出替换、defer 和 visibleOutput 已通过定向验证；后续记忆回执、MCP 部分失败/stale、持久化故障的正式流程验收见下节。
-- 尚未更新 CLI/UI 调用者，未构建全项目，未调用真实模型、外网、实际配置、用户数据库或真实业务工具。
+- 此条是早期阶段状态：CLI/TUI 后续已接入、全项目测试/构建已通过；发布测试仍不用真实模型、外网、实际配置或用户数据库。
 
 ## 2026-10-10 复杂审查阶段
 
@@ -59,7 +59,7 @@ Store 与 MCP Manager 的关闭责任分别由 CloseStore/CloseMCP 明确声明�
 - `Send` 在已结束子 Run 上继续时覆盖 childExecution.handle/result；若旧 Run 尚未进入 collectChildren，收齐时只能看到最新 Run。需要覆盖“同一父 Run 多次运行同一子任务”的具体交付用例，并落实未交付句柄保留。
 - 后台固定批次提交成功但 Advance 失败的回执恢复、MCP 部分失败/stale 不重放、持久化失败关闭准入仍需最小集成验收。不得以本轮局部检查替代这些条件。
 
-本轮材料：`C:/Users/27902/GolandProjects/Agent/runtime-review-20261010/`。validation 复用先前 acceptance 的非 Runtime Go 源码，经直接文本比较与当前源码一致；before 复用旧副本并补齐本轮开始时已有的 UpdatedInput 和 MCPShared 改动，未用于覆盖工作树。首次临时目录随工具沙箱销毁，交付材料已放在上述稳定目录。SHA-256 批次为 0。
+本轮材料：仓库外的该阶段审查材料目录。validation 复用先前 acceptance 的非 Runtime Go 源码，经直接文本比较与当前源码一致；before 复用旧副本并补齐本轮开始时已有的 UpdatedInput 和 MCPShared 改动，未用于覆盖工作树。首次临时目录随工具沙箱销毁，交付材料已放在上述稳定目录。SHA-256 批次为 0。
 
 实际检查记录（均在 validation，GOPROXY/GOSUMDB=off、GOTOOLCHAIN=local、CGO_ENABLED=0）：
 
@@ -112,4 +112,10 @@ Store 与 MCP Manager 的关闭责任分别由 CloseStore/CloseMCP 明确声明�
 | MCP | 正式 Host 启动部分失败保留基础及可用工具；工具失败调用一次；借用 Host 的 stale 绑定产生失败事实且不重放。 |
 | 持久失败 | 正式 Submit→工具启动保存遇到临时数据库写失败，工具执行计数为零、Runtime.Fault 设置、后续 Submit 被拒绝。 |
 
-真实剩余限制：CLI/UI 未接入新 API；Linux 未运行，仅目标编译；没有真实 Provider、外网或用户数据库验收；跨 Host/进程等待环没有持有者身份可检测；不支持子任务跨进程自动续跑。上述限制不通过扩包、虚构恢复入口或重跑全仓测试掩盖。
+真实剩余限制：CLI/TUI 后续已接入新 API，但五模块系统性代码审查未完成；Linux 未运行，仅目标编译；没有真实 Provider、外网或用户数据库验收；跨 Host/进程等待环没有持有者身份可检测；不支持子任务跨进程自动续跑。上述限制不通过扩包、虚构恢复入口或重跑全仓测试掩盖。
+
+## 当前子任务与权限接线
+
+四个模型接口保留现有 subagent.Controller，Runtime 负责公开结果投影。只传最终文本、状态与追溯 ID，thinking/签名和原始 ContentBlock 留在子会话。主动工具结果与正常收尾按具体 child Run 判重：读取父 Run 已保存的最终可见工具投影以及现有 child_run 来源记录；pending、被 Hook 隐藏或不完整输出不提前消费交付，没有另一套内存已交付开关。send_input 产生的新 Run 独立交付。Session/schema/Controller 未因该修复新增接口或表。
+
+可信内置任务调度声明 Permission.Orchestration；Permission 不认识子代理工具名。规则仍先检查显式禁用、Plan 和 External，Hook Ask 及子任务文件权限/范围独立生效。CLI/TUI 用可信 ContextRecord.Kind/SourceKind 区分宿主反馈和真正用户输入；结果面板只读不消费交付。更多当前命令与生效边界见 [根 README](../../README.md) 和 [CLI 文档](../cli/README.md)。

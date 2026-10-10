@@ -15,6 +15,8 @@ type commandResult struct {
 	value               any
 	reset, exit, cancel bool
 	choices             tui.ActionKind
+	prompt              string
+	form                *tui.FormEvent
 }
 type slashCommand struct {
 	name, usage, help string
@@ -32,24 +34,23 @@ func commandRegistry() []slashCommand {
 		}},
 		{"/model", "/model [REF]", "选择或切换模型", modelCommand},
 		{"/status", "/status", "当前会话、任务、审批与能力", viewCommand("status")},
+		{"/settings", "/settings", "只读有效设置、路径及 AGENTS 状态", viewCommand("settings")},
+		{"/permission", "/permission [default|auto_edit|auto_approve]", "当前项目唯一审批策略", policyCommand},
+		{"/plan", "/plan [内容]", "切换计划模式并可发送内容", modeCommand("plan")},
+		{"/build", "/build [内容]", "切换构建模式并可发送内容", modeCommand("build")},
 		{"/config", "/config", "实际配置路径与重启要求", viewCommand("config")},
 		{"/open", "/open PATH", "切换项目并创建新会话", func(ctx context.Context, a *application, arg string) (commandResult, error) {
 			if arg == "" {
 				return commandResult{}, fmt.Errorf("/open requires a directory")
 			}
-			arg = strings.Trim(arg, "\"'")
+			arg = commandPath(arg)
 			if !filepath.IsAbs(arg) {
 				arg = filepath.Join(a.capabilities.Instructions.ProjectRoot, arg)
 			}
 			return switchCommand(ctx, a, arg, "")
 		}},
-		{"/new", "/new", "当前项目新会话", func(ctx context.Context, a *application, arg string) (commandResult, error) {
-			if arg != "" {
-				return commandResult{}, fmt.Errorf("/new takes no arguments")
-			}
-			return switchCommand(ctx, a, a.capabilities.Instructions.ProjectRoot, "")
-		}},
-		{"/sessions", "/sessions", "列出可恢复主会话", viewCommand("sessions")},
+		{"/new", "/new [JSON options]", "选择项目、模型与长期记忆，创建新会话", newCommand},
+		{"/sessions", "/sessions [search|rename|archive|unarchive|history|export ...]", "会话列表、搜索、恢复与管理", sessionsCommand},
 		{"/session", "/session ID", "恢复主会话与保存目录", func(ctx context.Context, a *application, arg string) (commandResult, error) {
 			if arg == "" {
 				return commandResult{}, fmt.Errorf("/session requires an ID")
@@ -68,12 +69,12 @@ func commandRegistry() []slashCommand {
 			}
 			return commandResult{exit: true}, nil
 		}},
-		{"/skills", "/skills", "技能来源与已发现元数据", viewCommand("skills")},
-		{"/tools", "/tools", "已配置工具能力与目录边界", viewCommand("tools")},
+		{"/skills", "/skills [add|edit|remove ...]", "技能来源管理及加载错误", sourcesCommand("skills")},
+		{"/tools", "/tools [refresh|reconnect SERVER_ID]", "实际内置工具、参数与 MCP 服务器", toolsCommand},
 		{"/mcp", "/mcp [refresh|reconnect SERVER_ID]", "MCP 状态、目录或空闲刷新", mcpCommand},
-		{"/hooks", "/hooks", "脚本与原生 Hook 配置状态", viewCommand("hooks")},
+		{"/hooks", "/hooks [add|edit|remove ...]", "Hook 来源管理及加载错误", sourcesCommand("hooks")},
 		{"/memory", "/memory", "公开持久化进度；不推断后台完成", viewCommand("memory")},
-		{"/tasks", "/tasks", "子任务记录与已打开实例状态", viewCommand("tasks")},
+		{"/tasks", "/tasks [result ID|cancel ID|enable|disable|web_fetch enable|disable]", "子任务状态、结果与子代理/网页抓取能力设置", tasksCommand},
 	}
 }
 
@@ -203,7 +204,7 @@ func switchCommand(ctx context.Context, a *application, root, id string) (comman
 	if id == "" {
 		inv.modelRef = a.selectedRef
 	}
-	next := &application{options: options, invocation: inv, streams: a.streams, hint: a.hint, notices: a.notices, rawEvents: a.rawEvents, rawOverflow: a.rawOverflow, configFile: a.configFile, settingsFile: a.settingsFile, defaultModel: a.defaultModel}
+	next := &application{settingsBytes: append([]byte(nil), a.settingsBytes...), settingsDocument: a.settingsDocument, memoryDefault: a.memoryDefault, memoryBaseDirectory: a.memoryBaseDirectory, memoryBaseScope: a.memoryBaseScope, options: options, invocation: inv, streams: a.streams, hint: a.hint, notices: a.notices, rawEvents: a.rawEvents, rawOverflow: a.rawOverflow, configFile: a.configFile, settingsFile: a.settingsFile, settingsLoaded: a.settingsLoaded, defaultModel: a.defaultModel}
 	if err = next.openStore(ctx); err == nil {
 		err = next.assemble(ctx)
 	}
@@ -228,6 +229,8 @@ func switchCommand(ctx context.Context, a *application, root, id string) (comman
 
 func (a *application) commandView(ctx context.Context, kind string) (any, error) {
 	switch kind {
+	case "settings":
+		return a.settingsView(ctx)
 	case "status":
 		return a.status(), nil
 	case "config":
@@ -241,8 +244,14 @@ func (a *application) commandView(ctx context.Context, kind string) (any, error)
 		}
 		return map[string]any{"sources": a.capabilities.Skills, "discovered_metadata": items, "diagnostics": a.skillCatalog.Diagnostics, "body_loading": "progressive read; not eagerly loaded or executed"}, nil
 	case "hooks":
-		return map[string]any{"script_hooks": a.capabilities.ScriptHooks, "source_count": len(a.options.HookSources), "native_model_hooks": a.capabilities.ModelHooks, "reload": "restart"}, nil
+		sources := []map[string]string{}
+		for _, source := range a.options.HookSources {
+			sources = append(sources, map[string]string{"id": source.ID, "kind": string(source.Kind)})
+		}
+		return map[string]any{"sources": sources, "script_hooks": a.capabilities.ScriptHooks, "source_count": len(a.options.HookSources), "native_model_hooks": a.capabilities.ModelHooks, "reload": "restart"}, nil
 	case "tools":
+		return a.toolsView(ctx)
+	case "legacy_tools":
 		names := []string{}
 		for _, t := range a.options.Tools {
 			names = append(names, t.Tool.Name)

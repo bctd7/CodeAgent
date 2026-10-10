@@ -35,6 +35,7 @@ func (tx *Tx) CreateSession(ctx context.Context, info config.SessionInfo) error 
 		nil, // 新建会话归档状态必须为 NULL
 		nil, // 新建会话初始 HeadID 强制为 NULL，避免跨会话携带
 		selection,
+		info.MemoryEnabled,
 	)
 	if err != nil {
 		return fmt.Errorf("创建会话记录: %w", err)
@@ -207,6 +208,7 @@ func scanSession(row interface{ Scan(...any) error }) (config.SessionInfo, error
 		&archivedAt,
 		&headID,
 		&selection,
+		&info.MemoryEnabled,
 	)
 	if err != nil {
 		return config.SessionInfo{}, fmt.Errorf("获取会话: %w", err)

@@ -152,6 +152,24 @@ func (m *Model) View() (view string) {
 			title = m.dialog.title
 			controls = "↑/↓ 或滚轮滚动 · PgUp/PgDn 翻页 · Enter/Esc 返回"
 		}
+		if m.dialog.form != nil {
+			title = m.dialog.title
+			controls = "Tab 切换字段 · Enter 选择/提交 · 空格切换开关 · Esc 返回"
+		}
+		if m.dialog.menu != nil {
+			title = m.dialog.menu.Title
+			if m.dialog.menu.Search {
+				title += " · 搜索：" + m.dialog.filter
+			}
+			if len(m.dialog.menu.Filters) > 0 {
+				title += " · " + m.dialog.menu.Filters[m.dialog.filterIndex]
+			}
+			controls = "↑/↓ 选择 · Enter 打开/确认 · Tab 下一项/筛选 · Esc 返回"
+		}
+		if m.dialog.kind == ListSessions {
+			title = "会话 · 搜索：" + m.dialog.filter
+			controls = "输入搜索 · Enter 恢复 · Ctrl+R 重命名 · Ctrl+A 归档 · Ctrl+U 取消归档 · Ctrl+H 历史 · Ctrl+E 导出 · Esc 返回"
+		}
 		if m.dialog.kind == ListModels {
 			title = "选择模型"
 		}

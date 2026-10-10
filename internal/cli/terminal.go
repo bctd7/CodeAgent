@@ -13,6 +13,7 @@ import (
 	"CodeAgent/internal/llm"
 	"CodeAgent/internal/permission"
 	"CodeAgent/internal/runtime"
+	sc "CodeAgent/internal/session/config"
 	"CodeAgent/internal/tui"
 )
 
@@ -118,9 +119,11 @@ func (b *terminalBackend) handle(ctx context.Context, action tui.Action) ([]tui.
 		}
 		return nil, a.current.Steer(action.Text)
 	case tui.ListModels:
-		return b.choices(ctx, tui.ListModels)
+		events, _, err := b.page(ctx, "/model")
+		return events, err
 	case tui.ListSessions:
-		return b.choices(ctx, tui.ListSessions)
+		events, _, err := b.page(ctx, "/sessions")
+		return events, err
 	case tui.AnswerApproval:
 		choice := map[tui.ApprovalDecision]permission.Choice{tui.ApproveOnce: permission.Once, tui.ApproveSessionTool: permission.SessionTool, tui.Reject: permission.Reject}[action.Decision]
 		for _, item := range a.pending() {
@@ -144,10 +147,15 @@ func (b *terminalBackend) handle(ctx context.Context, action tui.Action) ([]tui.
 	default:
 		return nil, fmt.Errorf("unsupported frontend action")
 	}
+	if name, arg, _ := strings.Cut(strings.TrimSpace(action.Text), " "); strings.TrimSpace(arg) == "" {
+		if events, ok, err := b.page(ctx, name); ok {
+			return events, err
+		}
+	}
 	if b.active != nil {
 		name, _, _ := strings.Cut(strings.TrimSpace(action.Text), " ")
 		switch name {
-		case "/open", "/new", "/session", "/model", "/mcp":
+		case "/open", "/new", "/session", "/model", "/mcp", "/plan", "/build":
 			if name != "/model" || strings.TrimSpace(action.Text) != "/model" {
 				return nil, fmt.Errorf("任务仍活动；先 /cancel 并等待结束")
 			}
@@ -177,6 +185,15 @@ func (b *terminalBackend) handle(ctx context.Context, action tui.Action) ([]tui.
 		}
 		return []tui.Event{tui.NoticeEvent{Text: "已请求取消"}}, nil
 	}
+	if result.prompt != "" {
+		b.mu.Unlock()
+		events, e := b.start(ctx, result.prompt)
+		b.mu.Lock()
+		return events, e
+	}
+	if result.form != nil {
+		return []tui.Event{*result.form}, nil
+	}
 	var events []tui.Event
 	if result.reset {
 		var alerts []tui.Item
@@ -189,6 +206,15 @@ func (b *terminalBackend) handle(ctx context.Context, action tui.Action) ([]tui.
 		b.published = map[string]tui.Scope{}
 		b.answered = map[string]bool{}
 		events = append(events, tui.SnapshotEvent{Snapshot: b.snapshot()})
+	}
+	if action.Page != "" && !result.reset && result.form == nil && refreshAfterMenuCommand(action.Text) {
+		pages, ok, e := b.page(ctx, action.Page)
+		if e != nil {
+			return nil, e
+		}
+		if ok {
+			return append([]tui.Event{tui.NoticeEvent{Text: "操作已完成"}}, pages...), nil
+		}
 	}
 	if result.value != nil {
 		if result.choices != "" {
@@ -230,12 +256,12 @@ func (b *terminalBackend) choices(ctx context.Context, kind tui.ActionKind) ([]t
 			choices = append(choices, tui.Choice{ID: ref, Label: info.DisplayName, Detail: detail})
 		}
 	} else {
-		sessions, err := a.mainSessions(ctx)
+		sessions, err := a.listMainSessions(ctx, "", "all")
 		if err != nil {
 			return nil, err
 		}
 		for _, s := range sessions {
-			choices = append(choices, tui.Choice{ID: s.ID, Label: s.ID + " " + s.Title, Detail: s.WorkingDir})
+			choices = append(choices, tui.Choice{ID: s.ID, Label: s.ID + " " + s.Title, Detail: sessionDetail(s)})
 		}
 	}
 	return []tui.Event{tui.ChoicesEvent{Scope: tui.Scope{SessionID: a.current.SessionID()}, Kind: kind, Choices: choices}}, nil
@@ -278,7 +304,30 @@ func (b *terminalBackend) status() tui.Status {
 }
 func (b *terminalBackend) snapshot() tui.Snapshot {
 	a := b.app
-	items := historyItems(a, a.current.Snapshot().Agent.History)
+	// Session retains trusted entry kind/source; protocol user shape alone does
+	// not mean a person spoke. Use the final projection, including on restore.
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var items []tui.Item
+	if session, err := a.service.OpenSession(ctx, a.current.SessionID()); err == nil {
+		if records, err := session.GetContext(ctx); err == nil {
+			var messages []llm.Message
+			var sources []sc.ContextRecord
+			for _, record := range records {
+				if record.Message != nil {
+					messages = append(messages, record.Message)
+					sources = append(sources, record)
+				}
+			}
+			items = historyItems(a, messages, sources)
+		} else {
+			b.retainNotice(a.safe("读取会话展示失败：" + err.Error()))
+		}
+	} else {
+		b.retainNotice(a.safe("读取会话展示失败：" + err.Error()))
+	}
 	// Alerts stay separate from chronological chat, and survive recovery until dismissed.
 	var notices []tui.Notice
 	for _, item := range b.items {
@@ -465,14 +514,21 @@ func textBlocks(blocks []llm.ContentBlock) string {
 	}
 	return strings.Join(texts, "\n")
 }
-func historyItems(a *application, messages []llm.Message) []tui.Item {
+func historyItems(a *application, messages []llm.Message, origins ...[]sc.ContextRecord) []tui.Item {
 	out := []tui.Item{}
 	session := a.current.SessionID()
 	for i, msg := range messages {
 		id := fmt.Sprintf("%s/history/%d", session, i)
 		switch m := msg.(type) {
 		case *llm.UserMessage:
-			out = append(out, tui.Item{ID: id, Kind: tui.UserItem, Text: a.safe(textBlocks(m.Content))})
+			kind, text := tui.UserItem, textBlocks(m.Content)
+			if len(origins) > 0 && i < len(origins[0]) && origins[0][i].Kind == sc.ContextEntry {
+				kind = tui.NoticeItem
+				if origins[0][i].SourceKind == "child_run" {
+					text = formatChildContext(text)
+				}
+			}
+			out = append(out, tui.Item{ID: id, Kind: kind, Text: a.safe(text)})
 		case *llm.AssistantMessage:
 			if text := textBlocks(m.Content); text != "" {
 				out = append(out, tui.Item{ID: id, Kind: tui.AssistantItem, Text: a.safe(text)})
@@ -583,7 +639,12 @@ func (b *terminalBackend) project(envelope runtimeEnvelope) {
 	}
 	if ev.Message != nil {
 		if m, ok := ev.Message.(*llm.UserMessage); ok {
-			b.push(tui.ItemEvent{Scope: b.scope(), Item: tui.Item{ID: id + "/input", Kind: tui.UserItem, Text: a.safe(textBlocks(m.Content))}})
+			kind, text := tui.UserItem, textBlocks(m.Content)
+			if envelope.session != a.current.SessionID() {
+				kind = tui.NoticeItem
+				text = "子任务输入\n" + text
+			}
+			b.push(tui.ItemEvent{Scope: b.scope(), Item: tui.Item{ID: id + "/input", Kind: kind, Text: a.safe(text)}})
 		}
 	}
 	if ev.ToolName != "" {

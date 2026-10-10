@@ -10,6 +10,7 @@ import (
 
 type invocation struct {
 	action, task, sessionID, modelRef, directory, configPath, settingsPath, dataDir string
+	memoryDisabled                                                                  bool
 	stdin, json                                                                     bool
 	timeout                                                                         time.Duration
 	limit, offset                                                                   int
@@ -59,11 +60,12 @@ func parse(args []string) (invocation, error) {
 	fs := flag.NewFlagSet(i.action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&i.configPath, "config", "", "model/MCP TOML file")
-	fs.StringVar(&i.settingsPath, "settings", "", "trusted host JSON settings")
+	fs.StringVar(&i.settingsPath, "settings", "", "host JSON settings (default: next to executable)")
 	fs.StringVar(&i.dataDir, "data-dir", "", "session database and ownership directory")
 	fs.StringVar(&i.sessionID, "session", "", "main session ID")
 	fs.StringVar(&i.modelRef, "model", "", "configured provider/model REF")
 	fs.StringVar(&i.directory, "directory", "", "project directory")
+	fs.BoolVar(&i.memoryDisabled, "no-memory", false, "disable long-term memory for a new session")
 	fs.BoolVar(&i.stdin, "stdin", false, "read prompt or chat lines from stdin")
 	fs.BoolVar(&i.json, "json", false, "JSON output")
 	format := fs.String("format", "", "text or json")
@@ -145,6 +147,9 @@ func parse(args []string) (invocation, error) {
 	if strings.HasPrefix(i.action, "sessions:") && (i.stdin || i.timeout != 0 || i.modelRef != "" || i.directory != "" || len(i.skills) > 0 || len(i.hooks) > 0) {
 		return i, fmt.Errorf("execution flags are not valid for sessions queries")
 	}
+	if i.memoryDisabled && (i.sessionID != "" || strings.HasPrefix(i.action, "sessions:")) {
+		return i, fmt.Errorf("--no-memory only applies when creating a new session")
+	}
 	return i, nil
 }
 
@@ -156,11 +161,12 @@ codeagent sessions list [--limit 50] [--offset 0] [--archive-filter active|archi
 codeagent sessions show ID
 codeagent help | version
 Common: --config FILE --settings FILE --data-dir DIR --json
-Execution: --skills DIR (repeatable) --hooks FILE (repeatable)
+Execution: --skills DIR (repeatable) --hooks FILE (repeatable) --no-memory (new sessions only)
 Chat: /help lists session commands; no codeagent prefix inside chat.
 Approval: once | session | reject; /status /help /exit are also available.
 New model: --model > configured settings default_model > first sorted REF. Restore: --model > saved REF.
 Default config: config.toml next to codeagent.exe; working-directory TOML is ignored.
+  Default runtime settings: settings.json next to executable; missing file uses built-in defaults.
 Explicit --config/host override selects one file and never merges configurations.
 Interactive chat uses TUI; --json and --stdin keep headless output.
 JSON chat writes one JSON value per line. Noninteractive approval exits with code 3.

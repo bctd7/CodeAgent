@@ -3,10 +3,12 @@
 // 信任边界：Policy、Request 的来源身份、能力、完整参数和所有文件目标必须由可信
 // 调用方从注册表及实际调用中构造，不能相信模型传来的 flags 或 MCP readOnlyHint。
 // ReadOnly 只适用于可信内置的已知只读实现；FileWrite 只适用于普通文件写入且没有
-// 隐藏外部效果，目录操作或混合效果应标为 Unknown。外置工具始终标为 External。
+// 隐藏外部效果，目录操作或混合效果应标为 Unknown。Orchestration 仅表示可信宿主内部任务
+// 生命周期管理，不直接执行文件修改、shell 或外置工具；任务的实际工具仍独立检查权限。
+// 它不承诺零副作用，也不是通用免审标记。外置工具始终标为 External。
 //
 // Evaluate 是纯规则判断：Plan 只允许内置只读和指定计划目录内的 .md 写入；
-// Build 下内置只读直接允许，Default 其余能力询问，AutoEdit 额外允许工作目录内
+// Build 下内置只读和内部任务编排直接允许，Default 其余能力询问，AutoEdit 额外允许工作目录内
 // 普通写入，AutoApprove 将内置 Ask 转为 Allow。外置工具在 Build 下始终 Ask，
 // Plan 下 Deny。用户明确 DeniedTools 优先，任何授权均不得覆盖 Deny。
 //

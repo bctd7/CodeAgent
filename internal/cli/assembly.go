@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,10 +26,11 @@ import (
 	sc "CodeAgent/internal/session/config"
 	"CodeAgent/internal/session/store"
 	"CodeAgent/internal/skills"
+	"CodeAgent/internal/tools/extend/webfetch"
 )
 
-// hostSettings contains no credentials and is loaded only from an explicit trusted
-// --settings path. Path values resolve relative to that file. CLI skill/hook paths
+// hostSettings contains no credentials and is loaded from --settings or the
+// executable-directory settings.json. Path values resolve relative to that file. CLI skill/hook paths
 // resolve relative to the selected project. Sources are appended in declared order.
 type hostSettings struct {
 	DefaultModel    string               `json:"default_model"`
@@ -40,47 +43,65 @@ type hostSettings struct {
 	MemoryScope     string               `json:"memory_scope"`
 	MemoryLimits    longterm.Limits      `json:"memory_limits"`
 	Subagents       *bool                `json:"subagents"`
+	WebFetch        *bool                `json:"web_fetch"`
 }
 
 type application struct {
-	options      Options
-	invocation   invocation
-	streams      IO
-	store        *store.Store
-	service      *session.Service
-	host         *runtime.Host
-	current      *runtime.Runtime
-	selectedRef  string
-	defaultModel string
-	modelRefs    []string
-	manager      *mcp.Manager
-	ownsManager  bool
-	capabilities Capabilities
-	secrets      []string
-	hint         chan struct{}
-	notices      chan string
-	input        *inputReader
-	configFile   string
-	settingsFile string
-	entries      []config.ModelEntry
-	rawEvents    chan runtimeEnvelope
-	rawOverflow  chan struct{}
-	skillCatalog skills.Result
+	options                              Options
+	invocation                           invocation
+	streams                              IO
+	store                                *store.Store
+	service                              *session.Service
+	host                                 *runtime.Host
+	current                              *runtime.Runtime
+	selectedRef                          string
+	defaultModel                         string
+	modelRefs                            []string
+	manager                              *mcp.Manager
+	ownsManager                          bool
+	capabilities                         Capabilities
+	secrets                              []string
+	hint                                 chan struct{}
+	notices                              chan string
+	input                                *inputReader
+	configFile                           string
+	settingsLoaded                       bool
+	settingsBytes                        []byte
+	settingsDocument                     hostSettings
+	memoryBaseDirectory, memoryBaseScope string
+	memoryDefault                        bool
+	settingsFile                         string
+	entries                              []config.ModelEntry
+	rawEvents                            chan runtimeEnvelope
+	rawOverflow                          chan struct{}
+	skillCatalog                         skills.Result
 }
 
 func (a *application) loadSettings() error {
-	p := a.invocation.settingsPath
-	if p == "" {
+	if a.settingsLoaded {
 		return nil
 	}
-	a.settingsFile, _ = filepath.Abs(p)
+	p, err := resolveSettings(a.invocation.settingsPath)
+	if err != nil {
+		return err
+	}
+	if p == "" {
+		a.settingsLoaded = true
+		return nil
+	}
+
+	a.settingsFile = p
 	f, err := os.Open(p)
 	if err != nil {
 		return fmt.Errorf("cannot open host settings")
 	}
 	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	if err != nil || len(data) > 1<<20 {
+		return fmt.Errorf("host settings unreadable or too large")
+	}
 	var s hostSettings
-	decoder := json.NewDecoder(io.LimitReader(f, 1<<20))
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err = decoder.Decode(&s); err != nil {
 		return fmt.Errorf("invalid host settings")
@@ -89,6 +110,8 @@ func (a *application) loadSettings() error {
 	if decoder.Decode(&extra) != io.EOF {
 		return fmt.Errorf("host settings must contain one JSON object")
 	}
+	a.settingsBytes = append([]byte(nil), data...)
+	a.settingsDocument = s
 	a.defaultModel = s.DefaultModel
 	base, err := filepath.Abs(filepath.Dir(p))
 	if err != nil {
@@ -131,7 +154,7 @@ func (a *application) loadSettings() error {
 		a.options.Policy.ApprovalMode = s.Policy.ApprovalMode
 	}
 	if s.Policy.WorkingDir != "" {
-		return fmt.Errorf("policy WorkingDir comes from the selected session")
+		a.settingsDocument.Policy.WorkingDir = path(s.Policy.WorkingDir)
 	}
 	if s.Policy.PlanDir != "" {
 		a.options.Policy.PlanDir = path(s.Policy.PlanDir)
@@ -148,6 +171,16 @@ func (a *application) loadSettings() error {
 	if s.Subagents != nil {
 		a.options.Subagents = *s.Subagents
 	}
+	if s.WebFetch != nil {
+		if *s.WebFetch {
+			if a.options.WebFetch == nil {
+				a.options.WebFetch = &webfetch.WebFetchOptions{}
+			}
+		} else {
+			a.options.WebFetch = nil
+		}
+	}
+	a.settingsLoaded = true
 	return nil
 }
 
@@ -328,6 +361,41 @@ func (a *application) assemble(ctx context.Context) error {
 		}
 		a.options.Skills = append(a.options.Skills, skills.Source{Path: p, Name: "cli"})
 	}
+	if a.settingsDocument.Policy.WorkingDir != "" {
+		bound, e := filepath.Abs(a.settingsDocument.Policy.WorkingDir)
+		if e != nil {
+			return fmt.Errorf("invalid settings policy project: %w", e)
+		}
+		if bound != root {
+			a.options.Policy = permission.Policy{WorkMode: permission.Build, ApprovalMode: permission.Default}
+		} else {
+			a.options.Policy = a.settingsDocument.Policy
+			if a.options.Policy.PlanDir != "" && !filepath.IsAbs(a.options.Policy.PlanDir) {
+				a.options.Policy.PlanDir = filepath.Join(filepath.Dir(a.settingsFile), a.options.Policy.PlanDir)
+			}
+		}
+	}
+	a.options.Policy.WorkingDir = root
+	if (a.options.MemoryDirectory == "") != (a.options.MemoryScope == "") {
+		return fmt.Errorf("memory directory and scope must be provided together")
+	}
+	projectKey := root
+	if goRuntime.GOOS == "windows" {
+		projectKey = strings.ToLower(projectKey)
+	}
+	key := fmt.Sprintf("%x", sha256.Sum256([]byte(projectKey)))
+	if a.options.MemoryDirectory == "" || a.memoryDefault {
+		a.options.MemoryDirectory = filepath.Join(a.options.DataDir, "memory", key)
+		a.options.MemoryScope = "project:" + key
+		a.memoryDefault = true
+	} else {
+		if a.memoryBaseDirectory == "" {
+			a.memoryBaseDirectory = a.options.MemoryDirectory
+			a.memoryBaseScope = a.options.MemoryScope
+		}
+		a.options.MemoryDirectory = filepath.Join(a.memoryBaseDirectory, key)
+		a.options.MemoryScope = a.memoryBaseScope + ":" + key
+	}
 	a.skillCatalog = skills.Load(a.options.Skills)
 	for _, p := range i.hooks {
 		if !filepath.IsAbs(p) {
@@ -372,11 +440,12 @@ func (a *application) assemble(ctx context.Context) error {
 	}
 	a.host = host
 	if i.sessionID == "" {
-		info, err = host.Create(ctx, "")
+		info, err = host.Create(ctx, "", !i.memoryDisabled)
 		if err != nil {
 			return err
 		}
 	}
+	a.capabilities.Memory = info.MemoryEnabled && a.options.MemoryDirectory != ""
 	a.current, err = host.Open(ctx, info.ID)
 	if err != nil {
 		return err

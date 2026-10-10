@@ -61,16 +61,16 @@ func ValidateSessionWorkingDir(info config.SessionInfo) error {
 // 标题允许为空，工作目录允许未绑定（传入空字符串）。
 // 若传入非空目录，校验其存在且为目录并保存规范化绝对路径。
 // 初始 HeadID 强制为空，不创建 Run、消息或 Agent。
-func (s *Service) CreateSession(ctx context.Context, title, workingDir string) (config.SessionInfo, error) {
-	return s.createSession(ctx, title, workingDir, nil)
+func (s *Service) CreateSession(ctx context.Context, title, workingDir string, memoryEnabled bool) (config.SessionInfo, error) {
+	return s.createSession(ctx, title, workingDir, nil, memoryEnabled)
 }
-func (s *Service) CreateSessionWithModel(ctx context.Context, title, workingDir string, selection config.ModelSelection) (config.SessionInfo, error) {
+func (s *Service) CreateSessionWithModel(ctx context.Context, title, workingDir string, selection config.ModelSelection, memoryEnabled bool) (config.SessionInfo, error) {
 	if strings.TrimSpace(selection.Ref) == "" {
 		return config.SessionInfo{}, fmt.Errorf("模型引用不能为空")
 	}
-	return s.createSession(ctx, title, workingDir, &selection)
+	return s.createSession(ctx, title, workingDir, &selection, memoryEnabled)
 }
-func (s *Service) createSession(ctx context.Context, title, workingDir string, selection *config.ModelSelection) (config.SessionInfo, error) {
+func (s *Service) createSession(ctx context.Context, title, workingDir string, selection *config.ModelSelection, memoryEnabled bool) (config.SessionInfo, error) {
 	var normDir string
 	if workingDir != "" {
 		d, err := ValidateWorkingDir(workingDir)
@@ -83,6 +83,7 @@ func (s *Service) createSession(ctx context.Context, title, workingDir string, s
 	now := time.Now().UTC()
 	info := config.SessionInfo{
 		ID:             uuid.NewString(),
+		MemoryEnabled:  memoryEnabled,
 		ModelSelection: selection,
 		Title:          title,
 		WorkingDir:     normDir,

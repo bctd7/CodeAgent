@@ -9,11 +9,10 @@ import (
 
 func (m *Model) openChoices(kind ActionKind) tea.Cmd {
 	if m.pendingInput() {
-		m.notice = "请等待当前操作返回"
-		return nil
+		return m.showNotice("请等待当前操作返回")
 	}
 	cmd := m.dispatch(Action{Kind: kind}, "")
-	if cmd != nil {
+	if _, submitted := m.pending[kind]; submitted {
 		m.dialog = &dialog{kind: kind, requestID: m.pending[kind].id}
 		m.layout()
 	}
@@ -34,6 +33,10 @@ func (m *Model) refreshDialog() {
 		return
 	}
 	d := m.dialog
+	if d.kind == ActionKind("panel") || d.kind == ActionKind("notice") {
+		d.body.SetContent(ansi.Hardwrap(safeText(d.text), max(1, d.body.Width), true))
+		return
+	}
 	var lines []string
 	if len(d.choices) == 0 {
 		lines = append(lines, "暂无可选项")
@@ -60,6 +63,10 @@ func (m *Model) refreshDialog() {
 }
 func (m *Model) dialogKey(key tea.KeyMsg) tea.Cmd {
 	d := m.dialog
+	if (d.kind == ActionKind("panel") || d.kind == ActionKind("notice")) && (key.String() == "up" || key.String() == "down") {
+		d.body, _ = d.body.Update(key)
+		return nil
+	}
 	switch key.String() {
 	case "esc":
 		m.dialog = nil
@@ -76,6 +83,10 @@ func (m *Model) dialogKey(key tea.KeyMsg) tea.Cmd {
 	case "pgup", "pgdown":
 		d.body, _ = d.body.Update(key)
 	case "enter":
+		if d.kind == ActionKind("panel") || d.kind == ActionKind("notice") {
+			m.dialog = nil
+			return nil
+		}
 		if len(d.choices) == 0 || m.pendingInput() {
 			return nil
 		}
@@ -123,8 +134,7 @@ func (m *Model) approvalKey(key tea.KeyMsg) tea.Cmd {
 	request := m.approvals[0]
 	if !m.approvalScopeCurrent(request.Scope) {
 		m.removeApproval(request.Scope, request.ID)
-		m.notice = "审批请求已过期，未提交选择"
-		return nil
+		return m.showError("审批请求已过期，未提交选择")
 	}
 	if _, busy := m.pending[AnswerApproval]; busy {
 		return nil

@@ -25,13 +25,15 @@ type Item struct {
 	Tool *Tool
 }
 type Status struct {
-	SessionID, SessionTitle, Model, RunID, State, Detail string
-	Running                                              bool
+	SessionID, SessionTitle, Model, ModelName, RunID, State, Detail string
+	Running                                                         bool
 }
 type Snapshot struct {
-	Status Status
-	Items  []Item
+	Status  Status
+	Items   []Item
+	Notices []Notice
 }
+type Notice struct{ ID, Text string }
 type Choice struct{ ID, Label, Detail string }
 type Command struct{ Name, Description string }
 type Approval struct{ ID, Source, Tool, Parameters, Diff string }
@@ -56,17 +58,18 @@ const (
 	SelectSession  ActionKind = "select-session"
 	SelectModel    ActionKind = "select-model"
 	AnswerApproval ActionKind = "approval"
+	DismissNotice  ActionKind = "dismiss-notice"
 )
 
 type Action struct {
-	Kind                                         ActionKind
-	SessionID, RunID, Text, ChoiceID, ApprovalID string
-	Decision                                     ApprovalDecision
+	Kind                                                   ActionKind
+	SessionID, RunID, Text, ChoiceID, ApprovalID, NoticeID string
+	Decision                                               ApprovalDecision
 }
 
 // Handler 在 Tea 命令中异步执行，须遵守 context。取消/退出可与其他操作并发；
 // 调用方将其路由至持有的当前句柄。成功仅表示操作受理，Run 状态以事件为准。
-// 命令原文交给装配层的 CLI.Command，此包不解析命令业务或保存授权。
+// 命令原文交给 CLI 共享斜杠命令注册表，此包不解析命令业务或保存授权。
 // 错误及返回事件同样必须先脱敏，不允许传入密钥、请求头或原始配置对象。
 type Handler func(context.Context, Action) ([]Event, error)
 type Config struct {
@@ -115,8 +118,17 @@ type ApprovalResolvedEvent struct {
 }
 type NoticeEvent struct {
 	Scope
-	Text string
+	ID, Text   string
+	Persistent bool
 }
+type NoticeDismissedEvent struct{ ID string }
+type PanelEvent struct {
+	Scope
+	Title, Text string
+}
+
+func (NoticeDismissedEvent) tuiEvent() {}
+func (PanelEvent) tuiEvent()           {}
 
 // ExitEvent 由后端处理退出意图后发出；UI 不取消任务、不关闭 Host。
 type ExitEvent struct{}

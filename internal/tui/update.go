@@ -8,6 +8,17 @@ import (
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.BlurMsg:
+		m.windowFocused = false
+		return m, nil
+	case tea.FocusMsg:
+		m.windowFocused = true
+		return m, nil
+	case noticeExpired:
+		if msg.generation == m.noticeGeneration {
+			m.clearNotice()
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = max(1, msg.Width), max(1, msg.Height)
 		m.layout()
@@ -43,7 +54,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.err != nil {
-			m.notice = fmt.Sprintf("操作失败：%s", safeText(msg.err.Error()))
+			var noticeCmd tea.Cmd
+			text := fmt.Sprintf("操作失败：%s", safeText(msg.err.Error()))
+			if op.action.Kind == AnswerApproval {
+				m.clearNotice()
+				m.addAlert(Notice{Text: text})
+			} else {
+				noticeCmd = m.showError(text)
+			}
 			if op.action.Kind == CancelRun {
 				m.cancelledRun = ""
 				m.cancelRequested = false
@@ -51,9 +69,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if op.action.Kind == Quit {
 				m.quitRequested = false
 			}
-			return m, nil
+			return m, noticeCmd
 		}
-		m.notice = "操作已受理"
+		m.clearNotice()
 		if op.draft != "" && m.input.Value() == op.draft {
 			m.input.Reset()
 			m.completion = 0
@@ -65,6 +83,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dialog = nil
 		}
 		var cmds []tea.Cmd
+		if op.action.Kind == Send || op.action.Kind == Steer {
+			cmds = append(cmds, m.showNotice("任务已提交"))
+		}
 		for _, event := range msg.events {
 			if op.action.Kind == AnswerApproval && !m.approvalScopeCurrent(approvalScope) {
 				break
@@ -83,13 +104,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+q" {
 			return m, m.requestQuit()
 		}
+		if msg.String() == "ctrl+l" && len(m.alerts) > 0 {
+			return m, m.dismissAlert()
+		}
+		if msg.String() == "f1" && (len(m.alerts) > 0 || len(m.errorHistory) > 0) && len(m.approvals) == 0 {
+			m.openNoticeHistory()
+			return m, nil
+		}
 		if msg.String() == "ctrl+c" {
 			if m.status.Running {
 				if m.cancelRequested && m.cancelledRun == m.status.RunID {
 					return m, nil
 				}
 				cmd := m.dispatch(Action{Kind: CancelRun}, "")
-				if cmd != nil {
+				if _, submitted := m.pending[CancelRun]; submitted {
 					m.cancelledRun = m.status.RunID
 					m.cancelRequested = true
 				}
@@ -104,7 +132,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.dialogKey(msg)
 		}
 		switch msg.String() {
-		case "ctrl+s":
+		case "esc":
+			return m, m.dismissAlert()
+		case "enter", "ctrl+s":
 			return m, m.send(false)
 		case "alt+s":
 			return m, m.send(true)
@@ -159,6 +189,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	if len(m.approvals) == 0 && m.dialog == nil {
 		m.input, cmd = m.input.Update(msg)
+		m.syncInputViewport()
 	}
 	return m, cmd
 }
@@ -168,7 +199,7 @@ func (m *Model) requestQuit() tea.Cmd {
 		return nil
 	}
 	cmd := m.dispatch(Action{Kind: Quit}, "")
-	if cmd != nil {
+	if _, submitted := m.pending[Quit]; submitted {
 		m.quitRequested = true
 	}
 	return cmd
@@ -217,6 +248,18 @@ func (m *Model) apply(event Event) tea.Cmd {
 			return nil
 		}
 		m.dialog = &dialog{kind: event.Kind, choices: append([]Choice(nil), event.Choices...)}
+		for i, choice := range event.Choices {
+			if event.Kind == ListModels && choice.ID == m.status.Model || event.Kind == ListSessions && choice.ID == m.status.SessionID {
+				m.dialog.selected = i
+				break
+			}
+		}
+		m.layout()
+	case PanelEvent:
+		if !m.accepts(event.Scope) {
+			return nil
+		}
+		m.dialog = &dialog{kind: ActionKind("panel"), title: event.Title, text: event.Text}
 		m.layout()
 	case ApprovalEvent:
 		if !m.accepts(event.Scope) || event.Approval.ID == "" {
@@ -234,8 +277,14 @@ func (m *Model) apply(event Event) tea.Cmd {
 		m.removeApproval(m.bindApprovalScope(event.Scope), event.ID)
 	case NoticeEvent:
 		if m.accepts(event.Scope) {
-			m.notice = safeText(event.Text)
+			if event.Persistent {
+				m.addAlert(Notice{ID: event.ID, Text: event.Text})
+			} else {
+				return m.showNotice(event.Text)
+			}
 		}
+	case NoticeDismissedEvent:
+		m.removeAlert(event.ID)
 	case ExitEvent:
 		return tea.Quit
 	}

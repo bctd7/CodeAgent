@@ -3,3 +3,13 @@ config.toml
 .env
 .env.*
 !.env.example
+
+# Local binaries, session data and build caches
+*.exe
+*.zip
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+/go-cache/
+/test-temp/
